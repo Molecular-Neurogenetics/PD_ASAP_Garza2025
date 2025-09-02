@@ -7,10 +7,15 @@ This repository contains code and processed data supporting the publication. It 
 ## Repository Structure
 
 ASAP_publication_repo/
+
 ├── data/ # Clean processed data (tables, annotations, results)
+
 ├── code/ # Analysis code organized by data type and workflow stage
+
 ├── envs/ # Environment files (conda, Docker, R sessionInfo)
+
 ├── docs/ # Documentation and supplementary material
+
 └── README.md
 
 ---
