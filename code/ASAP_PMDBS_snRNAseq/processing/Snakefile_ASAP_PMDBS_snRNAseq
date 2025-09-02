@@ -1,0 +1,160 @@
+# -*- coding: utf-8 -*-
+"""
+Snakemake workflow for processing ASAP_PMDBS_snRNAseq cluster-level BAM files to obtain bigwig files.
+
+Overview:
+- Reads pre-processed BAM files from trusTEr outputs.
+- Indexes BAMs (SAMtools).
+- Generates normalized bigWig coverage tracks (deepTools).
+- Splits coverage tracks by strand (forward / reverse).
+
+Assumptions:
+- Config file defines "clusters" and "samples".
+- Input BAMs are organized under: {WD}/trusTEr_output/{region}/map_cluster/unique/.
+- Scaling factors are calculated based on per-cluster barcode counts.
+
+Run:
+    snakemake -j 5 \
+      --cluster-config /path/to/config.json \
+      --cluster "sbatch -A {cluster.account} -p {cluster.partition} \
+                 --tasks-per-node {cluster.tasks-per-node} \
+                 -t {cluster.time} -o {cluster.output} -e {cluster.error} \
+                 -J {cluster.job-name} -N {cluster.nodes}" \
+      --latency-wait 60
+"""
+
+import os
+
+# --------------------------------------------------------------------
+# Helper functions
+# --------------------------------------------------------------------
+def rreplace(s, old, new, occurrence):
+    """
+    Replace `occurrence` instances of `old` with `new` from the right side.
+    Used to generate filenames with "_merged.clusters".
+    """
+    li = s.rsplit(old, occurrence)
+    return new.join(li)
+
+# --------------------------------------------------------------------
+# Configuration
+# --------------------------------------------------------------------
+WD = "/path/to/processed/ASAP_PMDBS_snRNAseq/"  # working directory
+configfile: os.path.join(WD, "src/config_files/config_PFC.yaml") # Or "config_{region}.yaml"
+
+# config_{region}.yaml should define:
+#   clusters: [list of cluster IDs]
+#   samples:  [list of sample IDs]
+
+CLUSTER = config["clusters"]
+SAMPLES = config["samples"]
+
+# Calculate scaling factors (cluster_size) for normalization:
+#   Scale each cluster to 1e7 reads.
+cluster_sizes = {
+    i: 1e+7 / sum(1 for line in open(
+        os.path.join(WD, "barcodes/PFC/", (rreplace(i, "_", "_merged.clusters_", 1) + ".tsv")) # Or "barcodes/{region}/"
+    ))
+    for i in config["clusters"]
+}
+config.update(cluster_sizes)
+
+# --------------------------------------------------------------------
+# Workflow rules
+# --------------------------------------------------------------------
+
+rule all:
+    """
+    Default target: generate strand-specific bigWig files for all clusters.
+    """
+    input:
+        expand(
+            os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.forward.bw"), # Or "trusTEr_output/{region}"
+            cluster=CLUSTER
+        )
+
+rule indexing:
+    """
+    Index BAM files with SAMtools.
+    Produces .bam.bai index for each cluster BAM.
+    """
+    input:
+        os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.bam") # Or "trusTEr_output/{region}"
+    output:
+        os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.bam.bai") # Or "trusTEr_output/{region}"
+    shell:
+        """
+        ml GCC/11.3.0 SAMtools/1.16.1
+        samtools index -b {input}
+        module purge
+        """
+
+rule bigwig:
+    """
+    Convert BAM to normalized bigWig (all reads).
+    """
+    input:
+        bam=os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.bam"), # Or "trusTEr_output/{region}"
+        bai=os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.bam.bai") # Or "trusTEr_output/{region}"
+    output:
+        os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.bw") # Or "trusTEr_output/{region}"
+    params:
+        cluster_size=lambda wildcards: config[wildcards.cluster]
+    shell:
+        """
+        module purge
+        ml GCC/10.2.0 OpenMPI/4.0.5 deepTools/2.5.4
+        bamCoverage --scaleFactor {params.cluster_size} -b {input.bam} -o {output}
+        module purge
+        """
+
+rule filterStrand:
+    """
+    Generate strand-specific bigWig files.
+    Note:
+        deepTools assumes dUTP-based libraries:
+          --filterRNAstrand forward = minus-strand reads
+          --filterRNAstrand reverse = plus-strand reads
+        10x Genomics libraries are forward-sequenced (not dUTP).
+        Thus, we swap the naming convention here to match reality.
+    """
+    input:
+        bam=os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.bam"), # Or "trusTEr_output/{region}"
+        bai=os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.bam.bai") # Or "trusTEr_output/{region}"
+    output:
+        fwd=os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.forward.bw"), # Or "trusTEr_output/{region}"
+        rev=os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/{cluster}_Aligned.sortedByCoord.out.reverse.bw") # Or "trusTEr_output/{region}"
+    params:
+        cluster_size=lambda wildcards: config[wildcards.cluster]
+    shell:
+        """
+        ml GCC/10.2.0 OpenMPI/4.0.5 deepTools/2.5.4 
+
+        # "forward" flag actually corresponds to reverse transcription in 10x libraries.
+        bamCoverage --scaleFactor {params.cluster_size} --filterRNAstrand forward -b {input.bam} -o {output.rev}
+        # "reverse" flag corresponds to forward transcription in 10x libraries.
+        bamCoverage --scaleFactor {params.cluster_size} --filterRNAstrand reverse -b {input.bam} -o {output.fwd}
+
+        module purge
+        """
+
+# --------------------------------------------------------------------
+# Helper functions for downstream aggregation
+# --------------------------------------------------------------------
+def samples_clusters_fwd(wildcards):
+    """
+    Return list of forward-strand bigWigs for a given cluster group.
+    """
+    return [
+        os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/", i + "_Aligned.sortedByCoord.out.forward.bw") # Or "trusTEr_output/{region}"
+        for i in config[wildcards.cluster]
+    ]
+
+def samples_clusters_rev(wildcards):
+    """
+    Return list of reverse-strand bigWigs for a given cluster group.
+    """
+    return [
+        os.path.join(WD, "trusTEr_output/PFC/map_cluster/unique/", i + "_Aligned.sortedByCoord.out.reverse.bw") # Or "trusTEr_output/{region}"
+        for i in config[wildcards.cluster]
+    ]
