@@ -1,0 +1,285 @@
+---
+title: "QC and Exploratory Analysis of ASAP_PMDBS snRNA-seq"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Description
+
+This script performs **quality control (QC) exploration and visualization** of the ASAP_PMDBS single-nucleus RNA-seq dataset.  
+
+It integrates multiple metadata tables (QC metrics, UMAP embeddings, post-QC annotations, cell cycle, and gene-level summaries) to:  
+- Summarize sample metadata (patient, region, diagnosis, sex, age, PMI, Braak stage).  
+- Assess **sample composition** by region, diagnosis, and sex.  
+- Quantify and visualize **cell type distributions** across regions and conditions.  
+- Compute **per-sample and per-condition nuclei counts**, with totals, averages, and error bars.  
+- Generate **UMAP plots** by cluster, region, and diagnosis.  
+- Explore **QC metrics** (e.g., genes detected per nucleus, violin plots).  
+- Examine **cell cycle states** in microglia.  
+- Provide preliminary **gene-level summaries** for downstream analysis.  
+
+The outputs (barplots, violin plots, UMAPs, boxplots) give a global overview of **data quality, sample balance, and biological variation** before deeper analyses.  
+
+### 1. Setup  
+- Load required R packages.  
+- Import QC, UMAP, and metadata tables.  
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+library(RColorBrewer)
+library(tidyverse)
+
+qc_df <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/ASAP_QC_celltypes.csv", data.table = F)
+umap_df <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/counts_cellMeta_integrated_umap.csv", data.table = F)
+```
+
+
+### 2. Sample Composition  
+- Visualize sample distribution by region, diagnosis (PD vs. control), and sex.  
+- Calculate nuclei ratios across groups.  
+
+```{r}
+samples_df <- unique(qc_df[,c("sample_name", "patient", "region", "sex", "age", "pmi", "braak", "dx")])
+
+samples_df %>% 
+  ggplot(aes(x=region, fill=dx)) + geom_bar(stat="count", position="fill") + 
+  theme_bw() + 
+  scale_fill_manual(values = c("PD" = "#ed775f", "Ctl" = "#61bdc2")) + labs(y="Ratio of nuclei", x="", fill="Dx")
+
+samples_df %>% 
+  mutate(dx_sex = paste(dx, sex, sep="_")) %>% 
+  ggplot(aes(x=region, fill=dx_sex)) + geom_bar(stat="count", position="fill") + 
+  theme_bw() + 
+  scale_fill_manual(values = c("PD_M" = "#ed775f",
+                               "PD_F" = "#b54d38", 
+                               "Ctl_M" = "#7dcdd1",
+                               "Ctl_F" = "#4a9396")) + labs(y="Ratio of nuclei", x="", fill="Dx and sex")
+
+
+samples_df_freq <- as.data.frame(table(qc_df$dx, qc_df$sex, qc_df$region))
+colnames(samples_df_freq) <- c("dx", "sex", "region", "Freq")
+for(i in 1:nrow(samples_df_freq)){
+  tmp <- samples_df[which(samples_df$dx == samples_df_freq[i, "dx"]),]
+  tmp <- tmp[which(tmp$sex == samples_df_freq[i, "sex"]),]
+  tmp <- tmp[which(tmp$region == samples_df_freq[i, "region"]),]
+  num_samples <- nrow(tmp)
+  samples_df_freq[i, "num_samples"] <- num_samples
+}
+samples_df_freq$avg_freq <- samples_df_freq$Freq / samples_df_freq$num_samples
+celltype_palette <- get_palette("Set3", 8)
+celltype_palette[2] <- "#fae446"
+
+samples_df_freq %>% 
+  mutate(dx_sex = paste(dx, sex, sep="_")) %>% 
+  ggplot(aes(x=region, y=Freq, fill=dx_sex)) + geom_bar(stat = "identity", position = "dodge") + theme_bw() + 
+  scale_fill_manual(values = celltype_palette) + labs(y="Number of nuclei", x="", fill="Cell type") + facet_wrap(.~region, scales = "free", ncol=4)+ 
+  scale_fill_manual(values = c("PD_M" = "#ed775f",
+                               "PD_F" = "#b54d38", 
+                               "Ctl_M" = "#7dcdd1",
+                               "Ctl_F" = "#4a9396")) + ggtitle("Total number of nuclei per sample in group")
+
+samples_df_freq %>% 
+  mutate(dx_sex = paste(dx, sex, sep="_")) %>% 
+  ggplot(aes(x=region, y=avg_freq, fill=dx_sex)) + geom_bar(stat = "identity", position = "dodge") + theme_bw() + 
+  scale_fill_manual(values = celltype_palette) + labs(y="Number of nuclei", x="", fill="Cell type") + facet_wrap(.~region, scales = "free", ncol=4)+ 
+  scale_fill_manual(values = c("PD_M" = "#ed775f",
+                               "PD_F" = "#b54d38", 
+                               "Ctl_M" = "#7dcdd1",
+                               "Ctl_F" = "#4a9396")) + ggtitle("Average number of nuclei per sample in group")
+```
+
+### 3. Cell Type Distribution  
+- Plot proportions of nuclei by cell type and region.  
+- Summarize cell type frequencies per sample and per group.  
+
+```{r}
+qc_df %>% 
+  ggplot(aes(x=sample_name, fill=cell_type)) + geom_bar(stat = "count", position = "fill") + theme_bw() + theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) + facet_wrap(.~region, scales = "free_x") + scale_fill_manual(values = celltype_palette) + labs(y="Ratio of nuclei", x="", fill="Cell type")
+
+qc_df %>% 
+  ggplot(aes(x=region, fill=cell_type)) + geom_bar(stat = "count", position = "fill") + theme_bw() + 
+  scale_fill_manual(values = celltype_palette) + labs(y="Ratio of nuclei", x="", fill="Cell type")
+
+qc_df_freq <- as.data.frame(table(qc_df$cell_type, qc_df$region, qc_df$dx))
+colnames(qc_df_freq) <- c("cell_type", "region","Dx", "Freq")
+
+for(i in 1:nrow(qc_df_freq)){
+  qc_df_freq[i,"num_samples"] <- table(samples_df$region, samples_df$dx)[as.character(qc_df_freq[i, "region"]), as.character(qc_df_freq[i, "Dx"])]
+}
+qc_df_freq$avg_freq <- qc_df_freq$Freq / qc_df_freq$num_samples
+
+qc_df %>% 
+  ggplot(aes(x=region, fill=cell_type)) + geom_bar(stat = "count", position = "dodge") + theme_bw() + 
+  scale_fill_manual(values = celltype_palette) + labs(y="Number of nuclei", x="", fill="Cell type") + facet_wrap(.~region, scales = "free", ncol=4) + ggtitle("Total number of nuclei")
+
+qc_df_freq %>% 
+  ggplot(aes(x=Dx, y=avg_freq, fill=cell_type)) + geom_bar(stat = "identity", position = "dodge") + theme_bw() + 
+  scale_fill_manual(values = celltype_palette) + labs(y="Number of nuclei", x="", fill="Cell type") + facet_wrap(.~region, scales = "free", ncol=4) + ggtitle("Average number of nuclei per sample")
+```
+
+### 4. Nuclei Counts  
+- Total and average nuclei counts per sample/condition.  
+- Error bars for variability across samples.  
+- Boxplots comparing cell type counts between PD and controls.  
+
+```{r}
+## With error bars (mean per cell type)
+postqc_meta <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/postQC_cellMeta.csv", data.table=F)
+
+postqc_meta %>% 
+  group_by(sample_name, cell_type, dx, region) %>% 
+  summarize(n_nuclei = n()) %>% 
+  ggplot(aes(x=dx, y=sqrt(n_nuclei))) +
+  stat_summary(aes(fill=cell_type), position="dodge", fun.y = mean, geom = "bar") + 
+  stat_summary(aes(fill=cell_type), position="dodge", fun.data = mean_se, geom = "errorbar", size=0.3) +
+  theme_bw() + 
+  facet_wrap(.~region, scales="free", ncol=8) +
+  labs(x="Sample name", y="sqrt(Num of nuclei)", fill="Region") + 
+  scale_fill_manual(values = celltype_palette) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Average number of nuclei per sample")
+
+postqc_meta %>% 
+  group_by(sample_name, cell_type, dx, region) %>% 
+  summarize(n_nuclei = n()) %>% 
+  ggplot(aes(x=dx, y=(n_nuclei))) +
+  stat_summary(aes(fill=cell_type), position="dodge", fun.y = mean, geom = "bar") + 
+  stat_summary(aes(fill=cell_type), position="dodge", fun.data = mean_se, geom = "errorbar", size=0.3) +
+  theme_bw() + 
+  facet_wrap(.~region, scales="free", ncol=8) +
+  labs(x="Sample name", y="Num of nuclei", fill="Region") + 
+  scale_fill_manual(values = celltype_palette) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Average number of nuclei per sample")
+
+postqc_meta %>% 
+  group_by(sample_name, cell_type, dx, region) %>% 
+  summarize(n_nuclei = n()) %>% 
+  ggplot(aes(x=cell_type, y=(n_nuclei))) +
+  stat_summary(aes(fill=dx), position="stack", fun.y = mean, geom = "bar") + 
+  theme_bw() + 
+  facet_wrap(.~region, scales="free", ncol=8) +
+  labs(x="", y="Avg num of nuclei", fill="Region") + 
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle("Average number of nuclei per cell type")
+
+postqc_meta %>% 
+  mutate(region_dx = paste0(region, dx, cell_type, sep="_")) %>% 
+  group_by(region, dx, cell_type, sample_name) %>% 
+  summarize(count = n()) %>% 
+ggplot(aes(x = as.character(cell_type), color = dx, y=sqrt(count))) + geom_point(size=0.3,width = 0.2, position=position_jitterdodge()) + theme_bw() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank()) + 
+  geom_boxplot(width=0.5, alpha=0.5, outliers = F, position = position_dodge(width = 0.9)) +
+  scale_color_manual(values = c("Ctl" = "lightgrey", "PD" = "#88c3e3")) + labs(x="Cluster", y="sqrt(Num nuclei)", color="Dx") + 
+  facet_wrap(.~region, ncol=4) + stat_compare_means(label = "p.signif", paired = F, label.y.npc = 0.9) + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+
+tmp <- postqc_meta %>% 
+  filter(region == "PUT") %>% 
+  filter(cell_type %in% c("0_ExcNeurons", "1_InhNeurons")) %>% 
+  group_by(sample_name, cell_type, dx, region) %>% 
+  summarize(n_nuclei = n())
+
+mean(tmp[which(tmp$cell_type == "0_ExcNeurons"), "n_nuclei", drop=T])
+sd(tmp[which(tmp$cell_type == "0_ExcNeurons"), "n_nuclei", drop=T])/sqrt(length(tmp[which(tmp$cell_type == "0_ExcNeurons"), "n_nuclei", drop=T]))
+
+postqc_meta %>% 
+  filter(cell_type %in% c("4_Microglia")) %>% 
+  group_by(sample_name, cell_type, dx, region) %>% 
+  summarize(n_nuclei = n()) %>% 
+  ungroup() %>% 
+  group_by(cell_type, dx, region) %>% 
+  summarize(mean_group = mean(n_nuclei), n_samples = n(), sd_group = sd(n_nuclei)/sqrt(n_samples))
+
+```
+### 5. UMAP Visualization  
+- UMAP embeddings colored by cluster, region, and diagnosis.  
+- Faceted plots showing variation across conditions.  
+
+```{r}
+umap_df %>% 
+  ggplot(aes(x = UMAP1, y= UMAP2, color=as.character(leiden))) + geom_point(size=0.01) + 
+  scale_color_manual(values = celltype_palette) + theme_void() + labs(color="Cluster")
+
+umap_df %>% 
+  ggplot(aes(x = UMAP1, y= UMAP2, color=as.character(leiden))) + geom_point(size=0.01) + 
+  scale_color_manual(values = celltype_palette) + theme_void() + labs(color="Cluster") + facet_wrap(dx~region, ncol=4)
+```
+
+### 6. QC Metrics  
+- Mean and variance of detected genes per sample.  
+- Violin plots showing gene detection distribution across nuclei.  
+
+```{r}
+region_palette <- c("SN" = "#f79e4d", 
+                    "PFC" = "#b2d096", 
+                    "PUT" = "#8f9bef", 
+                    "AMY" = "#dfb5e5")
+
+region_palette_dark <- c("SN" = "#d16a0d", 
+                    "PFC" = "#608042", 
+                    "PUT" = "#394499", 
+                    "AMY" = "#945d9c")
+qc_df$dx <- factor(qc_df$dx, levels=c("Ctl", "PD"))
+qc_df$sample_name <- factor(qc_df$sample_name, levels = as.character(unique(qc_df[order(qc_df$dx), "sample_name"])))
+
+ggplot(data = qc_df, aes(x=sample_name, y=n_genes_by_counts, fill=region)) + 
+  geom_bar(stat = "summary", fun="mean") + 
+  stat_summary(aes(color=region), fun=mean, geom="errorbar", fun.data="mean_sd", width=0.3)  + 
+  scale_color_manual(values = region_palette_dark) +
+  theme_bw() + 
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) +
+  facet_wrap(.~region, scales = "free_x") + scale_fill_manual(values = region_palette) + ggtitle("Genes detected in at least one nuclei", subtitle = "Mean number of genes detected +/- standard deviation of mean") + labs(y="Mean number of genes detected", x="", fill="Region")
+
+qc_df %>% 
+  ggplot(aes(x=sample_name, y=n_genes_by_counts, fill=region, color=region)) + geom_jitter(width = 0.3, alpha = 0.5, size=0.1) + geom_violin(linewidth = 0.1) + geom_boxplot(linewidth = 0.2, outliers = F, width=0.2) + theme_bw() + theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()) + facet_wrap(.~region, scales = "free_x") + scale_fill_manual(values = region_palette) + scale_color_manual(values = region_palette_dark) + labs(y="Median number of genes detected", x="", fill="Region")
+```
+
+### 7. Microglia Cell Cycle Analysis  
+- Phase assignment in microglia (e.g., G1, S, G2/M).  
+- Per-sample ratios of nuclei in each cell cycle phase.  
+- Group comparisons with statistical tests.  
+
+```{r}
+umap_cellcycle_df <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/counts_cellcycle_cellMeta_integrated_umap.csv", data.table = F)
+
+num_nuclei_sample <- umap_cellcycle_df %>% 
+  filter(cell_type == "4_Microglia") %>% 
+  count(sample_name)
+colnames(num_nuclei_sample)[2] <- "num_nuclei"
+
+num_nuclei_phase_sample <- umap_cellcycle_df %>% 
+  filter(cell_type == "4_Microglia") %>% 
+  group_by(sample_name) %>% 
+  count(phase)
+colnames(num_nuclei_phase_sample)[3] <- "num_nuclei_phase"
+
+num_nuclei_phase_sample <- merge(num_nuclei_sample, num_nuclei_phase_sample, by="sample_name")
+num_nuclei_phase_sample <- merge(num_nuclei_phase_sample, unique(umap_cellcycle_df[,c("sample_name", "dx", "region")]), by="sample_name")
+num_nuclei_phase_sample$ratio <- num_nuclei_phase_sample$num_nuclei_phase/num_nuclei_phase_sample$num_nuclei
+
+num_nuclei_phase_sample %>% 
+  filter(phase=="S") %>%
+  ggplot(aes(x=dx, y=ratio, fill=dx)) + 
+  geom_jitter(width=0.2, aes(color=dx)) +
+  geom_bar(stat = "summary", fun="mean", alpha=0.5) + 
+  stat_summary(fun=mean, geom="errorbar", fun.data="mean_se", width=0.3)  + 
+  theme_bw() +
+  stat_compare_means(label = "p.format", label.x.npc = 0.3, method = "t.test") +
+  facet_wrap(.~region, scales = "free_x", ncol=4) + 
+  labs(x="", y="Mean ratio and std error") + 
+  ggtitle("Microglia: Ratio of nuclei in S phase per sample")
+
+```
+
+
+
+
