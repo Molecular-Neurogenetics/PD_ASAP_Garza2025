@@ -1,0 +1,54 @@
+---
+title: "Microglia Subclustering Visualization"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+This R Markdown generates UMAP plots of microglia nuclei after subclustering.  
+It merges metadata with gene expression counts and visualizes clusters and regions.  
+
+1. **Load Data**  
+   - `microglia_subcluster_genes_counts.csv`: gene expression counts per cell.  
+   - `counts_microglia_cellMeta_integrated_umap.csv`: metadata with UMAP coordinates, cluster labels, and sample information.  
+
+2. **Merge**  
+   - Combine metadata and gene counts by cell barcode.  
+
+3. **Visualization**  
+   - UMAP colored by **subcluster (Leiden clustering)**, faceted by brain region and diagnosis.  
+   - UMAP colored by **region**, to assess spatial and diagnostic distribution.  
+
+## Outputs
+- UMAP plots highlighting:
+  - Subclusters across brain regions and disease conditions.  
+  - Regional composition in microglia subclusters.  
+  
+```{r}
+library(data.table)
+library(tidyverse)
+library(ggplot2)
+
+microglia_df <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/microglia/microglia_subcluster_genes_counts.csv", data.table=F)
+microglia_meta <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/microglia/counts_microglia_cellMeta_integrated_umap.csv", data.table=F)
+microglia_df <- merge(microglia_meta, microglia_df, by.x="Barcode", by.y="V1")
+
+ggplot(microglia_df, aes(x=UMAP1, y=UMAP2, color=as.factor(leiden))) + geom_point(size=0.3) + 
+  theme_bw() + scale_colour_brewer(palette = "Set3") +
+   theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank()) + labs(color="Cluster") + ggtitle("Microglia subclustering")
+
+ggplot(microglia_df, aes(x=UMAP1, y=UMAP2, color=as.factor(leiden))) + geom_point(size=0.3) + 
+  theme_bw() + facet_wrap(region~dx, ncol=4) + scale_colour_brewer(palette = "Set3") +
+   theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank()) + labs(color="Cluster") + ggtitle("Microglia subclustering")
+
+ggplot(microglia_df, aes(x=UMAP1, y=UMAP2, color=as.factor(region))) + 
+  geom_point(size=0.3) + theme_bw() + scale_colour_brewer(palette = "Set2") +
+   theme(axis.title=element_blank(),
+        axis.text=element_blank(),
+        axis.ticks=element_blank()) + labs(color="Region") + ggtitle("Microglia subclustering")
+```
