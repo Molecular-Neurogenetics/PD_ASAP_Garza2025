@@ -6,49 +6,92 @@ output:
     df_print: paged
 ---
 
-This R Markdown generates UMAP plots of microglia nuclei after subclustering.  
-It merges metadata with gene expression counts and visualizes clusters and regions.  
+This notebook visualizes **microglia subclustering** results from integrated snRNA-seq analysis.  
+The goal is to explore cluster structure, regional variation, and diagnostic differences (PD vs. control).  
 
-1. **Load Data**  
-   - `microglia_subcluster_genes_counts.csv`: gene expression counts per cell.  
-   - `counts_microglia_cellMeta_integrated_umap.csv`: metadata with UMAP coordinates, cluster labels, and sample information.  
+### Contents
+- **UMAP projections:**  
+  - Microglia nuclei colored by Leiden clusters.  
+  - Faceted UMAPs by brain region and diagnosis.  
+  - UMAPs colored by region to highlight spatial heterogeneity.  
 
-2. **Merge**  
-   - Combine metadata and gene counts by cell barcode.  
+- **Cluster composition analysis:**  
+  - Counts of nuclei per cluster, grouped by region, diagnosis, and sample.  
+  - Boxplots with jittered sample points (square-root scaled) showing nuclei distribution across clusters.  
+  - Statistical comparison (PD vs. control) using `ggpubr::stat_compare_means`, annotated directly on plots.  
 
-3. **Visualization**  
-   - UMAP colored by **subcluster (Leiden clustering)**, faceted by brain region and diagnosis.  
-   - UMAP colored by **region**, to assess spatial and diagnostic distribution.  
+These visualizations provide both qualitative (UMAPs) and quantitative (cluster size distributions) insights into microglia subpopulations across regions and disease states.
 
-## Outputs
-- UMAP plots highlighting:
-  - Subclusters across brain regions and disease conditions.  
-  - Regional composition in microglia subclusters.  
-  
+---
+
+## Load Packages and Data
 ```{r}
 library(data.table)
+library(ggpubr)
 library(tidyverse)
 library(ggplot2)
 
-microglia_df <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/microglia/microglia_subcluster_genes_counts.csv", data.table=F)
-microglia_meta <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/microglia/counts_microglia_cellMeta_integrated_umap.csv", data.table=F)
-microglia_df <- merge(microglia_meta, microglia_df, by.x="Barcode", by.y="V1")
+microglia_subclustering_umap <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_microglia/microglia_subcluster_clustering_umap_barcodes.csv", data.table = F)
+microglia_subclustering_leiden <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_microglia/microglia_subcluster_clustering_leiden_barcodes.csv", data.table = F)
 
-ggplot(microglia_df, aes(x=UMAP1, y=UMAP2, color=as.factor(leiden))) + geom_point(size=0.3) + 
+microglia_subclustering <- merge(microglia_subclustering_umap, microglia_subclustering_leiden, by="V1")
+cluster_colors = c("0" = "#8ed1c6",
+                   "1" = "#eec819",
+                   "2" = "#bebada",
+                   "3" = "#f48073",
+                   "4" = "#80b2d3",
+                   "5" = "#fbb363",
+                   "6" = "#b4d66c",
+                   "7" = "#f9cde1",
+                   "8" = "#d9d9d8")
+```
+
+## UMAP visualization
+
+### Clusters
+```{r}
+ggplot(microglia_subclustering, aes(x=V2, y=V3, color=as.factor(leiden))) + geom_point(size=0.3) + 
   theme_bw() + scale_colour_brewer(palette = "Set3") +
    theme(axis.title=element_blank(),
         axis.text=element_blank(),
-        axis.ticks=element_blank()) + labs(color="Cluster") + ggtitle("Microglia subclustering")
+        axis.ticks=element_blank()) + scale_color_manual(values = cluster_colors) + 
+  labs(color="Cluster", x="UMAP1", y="UMAP2") + ggtitle("Microglia subclustering")
+```
 
-ggplot(microglia_df, aes(x=UMAP1, y=UMAP2, color=as.factor(leiden))) + geom_point(size=0.3) + 
+### Clusters by region and diagnosis
+```{r}
+ggplot(microglia_subclustering, aes(x=V2, y=V3, color=as.factor(leiden))) + geom_point(size=0.3) + 
   theme_bw() + facet_wrap(region~dx, ncol=4) + scale_colour_brewer(palette = "Set3") +
    theme(axis.title=element_blank(),
         axis.text=element_blank(),
-        axis.ticks=element_blank()) + labs(color="Cluster") + ggtitle("Microglia subclustering")
+        axis.ticks=element_blank()) + scale_color_manual(values = cluster_colors) + 
+  labs(color="Cluster", x="UMAP1", y="UMAP2") + ggtitle("Microglia subclustering")
+```
 
-ggplot(microglia_df, aes(x=UMAP1, y=UMAP2, color=as.factor(region))) + 
+### Regions
+```{r}
+ggplot(microglia_subclustering, aes(x=V2, y=V3, color=as.factor(region))) + 
   geom_point(size=0.3) + theme_bw() + scale_colour_brewer(palette = "Set2") +
    theme(axis.title=element_blank(),
         axis.text=element_blank(),
-        axis.ticks=element_blank()) + labs(color="Region") + ggtitle("Microglia subclustering")
+        axis.ticks=element_blank()) +
+  labs(color="Region", x="UMAP1", y="UMAP2") + ggtitle("Microglia subclustering")
+```
+
+## Cluster composition
+
+### Boxplots with nuclei counts
+```{r}
+microglia_subclustering %>% 
+  mutate(region_dx = paste(region, dx, sep="_")) %>% 
+  group_by(region, dx, leiden, sample_name) %>% 
+  summarize(count = n()) %>% 
+ggplot(aes(x = as.character(leiden), color = dx, y=sqrt(count))) + 
+  geom_point(size=0.3,width = 0.2, position=position_jitterdodge()) + theme_bw() + 
+  theme(panel.grid.major = element_blank(), 
+        panel.grid.minor = element_blank(), 
+        panel.background = element_blank()) + 
+  geom_boxplot(width=0.5, alpha=0.5, outliers = F, position = position_dodge(width = 0.9)) +
+  scale_color_manual(values = c("Ctl" = "lightgrey", "PD" = "#88c3e3")) + labs(x="Cluster", y="sqrt(Num nuclei)", color="Dx") + 
+  facet_wrap(.~region, ncol=2) + stat_compare_means(label = "p.signif", paired = F, label.y.npc = 0.9) 
 ```
