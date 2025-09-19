@@ -1,0 +1,315 @@
+---
+title: "TE Differential Expression Analysis"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Overview
+This notebook analyzes **differentially expressed transposable elements (specifically, >6kbp L1HS-L1PA3)** and **human endogenous retroviruses (HERVs)** across brain regions and cell types in the ASAP-PMDBS snRNA-seq dataset.  
+
+It builds on the **heatmap visualization notebook** (`TE_expression_heatmaps.Rmd`) by using the preprocessed TE pseudobulk data and shared functions to:
+- Run UMAPs of pseudobulk TE expression.
+- Identify TE and HERV markers for specific cell types and clusters.
+- Visualize TE/HERV markers with boxplots across cell types.
+- Extend analysis to region-specific differential expression.
+
+---
+
+## Data & Functions
+```{r}
+# Load preprocessed data and functions
+load("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/visualization/preprocessed_TE_data.RData")
+source("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/visualization/TE_heatmap_functions.R")
+```
+
+## Set up
+```{r}
+library(umap)
+library(DESeq2)
+library(data.table)
+library(ggpubr)
+library(ggplot2)
+library(tidyverse)
+library(openxlsx)
+```
+
+## L1 expression normalization and UMAP
+```{r}
+# Load ranked L1s per region (from bulk RNA-seq reference)
+L1s_sorted_pfc <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PFC.tab")$V1
+L1s_sorted_put <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PUT.tab")$V1
+L1s_sorted_sn <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_SN.tab")$V1
+L1s_sorted_amy <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_AMY.tab")$V1
+
+# Normalize snRNA-seq pseudobulk counts for these elements
+TE_data_norm <- asap_heatmap_snRNA(region = c("PFC", "PUT", "SN", "AMY"), tes = unique(c(L1s_sorted_pfc, L1s_sorted_put, L1s_sorted_sn, L1s_sorted_amy)), filter_low_pseudocounts = F, return_df = T, data = TE_data, title = ">6kbp L1HS-PA3")
+
+# UMAP projection
+L1_umap <- umap(t(TE_data_norm$norm_counts[unique(c(L1s_sorted_pfc, L1s_sorted_put, L1s_sorted_sn, L1s_sorted_amy)),TE_data_norm$samplesheet$sample_cluster]))
+L1_umap$layout <- as.data.frame(L1_umap$layout)
+colnames(L1_umap$layout) <- c("UMAP_1", "UMAP_2")
+
+# Merge metadata and plot UMAP by cell type and diagnosis
+L1_umap$layout <- merge(L1_umap$layout, TE_data_norm$samplesheet[,c("sample_cluster", "celltype", "Dx")], by.x="row.names", by.y="sample_cluster")
+ggplot(L1_umap$layout, aes(x=UMAP_1, y=UMAP_2, color=celltype)) + geom_point() + theme_bw()
+ggplot(L1_umap$layout, aes(x=UMAP_1, y=UMAP_2, color=Dx)) + geom_point() + theme_bw()
+```
+
+## HERV expression normalization and UMAP
+
+```{r}
+# Load ranked HERVs per region (from bulk RNA-seq reference)
+HERVs_sorted_pfc <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PFC.tab")$V1
+HERVs_sorted_put <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PUT.tab")$V1
+HERVs_sorted_sn <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_SN.tab")$V1
+HERVs_sorted_amy <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_AMY.tab")$V1
+
+# Normalize pseudobulk counts for HERVs
+HERV_data_norm <- asap_heatmap_snRNA(region = c("PFC", "PUT", "SN", "AMY"), tes = unique(c(HERVs_sorted_pfc, HERVs_sorted_put, HERVs_sorted_sn, HERVs_sorted_amy)), data = HERV_data, return_df = T, title = "HERVs", prefix="HERV", filter_low_pseudocounts = F)
+
+# UMAP projection by cell type and diagnosis
+HERV_umap <- umap(t(HERV_data_norm$norm_counts[,-ncol(HERV_data_norm$norm_counts)]))
+HERV_umap$layout <- as.data.frame(HERV_umap$layout) 
+colnames(HERV_umap$layout) <- c("UMAP_1", "UMAP_2")
+HERV_umap$layout <- merge(HERV_umap$layout, HERV_data_norm$samplesheet[,c("sample_cluster", "celltype", "Dx")], by.x="row.names", by.y="sample_cluster")
+
+ggplot(HERV_umap$layout, aes(x=UMAP_1, y=UMAP_2, color=celltype)) + geom_point() + theme_bw()
+ggplot(HERV_umap$layout, aes(x=UMAP_1, y=UMAP_2, color=Dx)) + geom_point() + theme_bw()
+
+```
+
+## Differential Expression Analysis: Cell type markers
+
+### Function `FindTEMarkers()`
+Wrapper to run DESeq2 comparing each cluster vs all other clusters
+* Runs DESeq2 for each cluster vs all others.
+* Stores results in a per-cluster list.
+* Applied separately to HERVs and L1s.
+```{r}
+FindTEMarkers <- function(df, clusters, coldata){
+  dds_list <- list()
+  res_list <- list()
+  for(c in clusters){
+    coldata$condition <- ifelse(coldata$cluster == c, paste("Cluster", c), "Other")
+    dds_list[[c]] <- DESeqDataSetFromMatrix((df[,coldata$sample_cluster]+1), coldata, design =  ~ condition)
+    dds_list[[c]]$condition <- relevel(dds_list[[c]]$condition, "Other")
+    dds_list[[c]] <- DESeq(dds_list[[c]])
+    res_list[[c]] <- as.data.frame(results(dds_list[[c]]))
+    res_list[[c]]$TE_id <- rownames(res_list[[c]])
+  }
+  return(res_list)
+}
+
+HERV_clusters_res_list <- FindTEMarkers(df = HERV_data$te_counts[unique(c(HERVs_sorted_pfc, HERVs_sorted_put, HERVs_sorted_sn, HERVs_sorted_amy)), HERV_data_norm$samplesheet$sample_cluster], clusters = as.character(0:7), coldata =  HERV_data_norm$samplesheet)
+
+L1_clusters_res_list <- FindTEMarkers(df = TE_data$te_counts[unique(c(L1s_sorted_pfc, L1s_sorted_put, L1s_sorted_sn, L1s_sorted_amy)), TE_data_norm$samplesheet$sample_cluster], clusters = as.character(0:7), coldata =  TE_data_norm$samplesheet)
+
+write.xlsx(HERV_clusters_res_list, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/HERV_markers_clusters_res.xlsx")
+write.xlsx(L1_clusters_res_list, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/L1_markers_clusters_res.xlsx")
+```
+
+## Cell type Markers visualization
+
+* Visualizes cluster-specific markers with boxplots and jittered points.
+* Adds DE significance values from DESeq2 tests.
+
+```{r}
+plot_topn_markers <- function(df, res, cluster, prefix, samplesheet, ytitle, ylim = NA, title = NA, topn = 1, colors = NA){
+    if(is.numeric(topn)){
+      signif_res <- res[[cluster]][which(res[[cluster]]$log2FoldChange > 1 & res[[cluster]]$padj < 0.05),]
+      marker_names <- rownames(signif_res[order(signif_res$log2FoldChange, signif_res$baseMean),])[topn]  
+    }else{
+      marker_names <- topn
+    }
+    
+    
+    df <- as.data.frame(t(df[marker_names,]))
+    for(te in colnames(df)[startsWith(colnames(df), prefix)]){
+      df[,te] <- as.numeric(df[,te])  
+    }
+    df <- merge(df, samplesheet, by.x="row.names", by.y="sample_cluster")
+    df_melt <- reshape2::melt(df[,c("Row.names", marker_names, "celltype", "cluster")], by=list(df$Row.names, df$celltype))
+    
+    plt <- ggplot(df_melt, aes(x=celltype, y=value, fill=celltype)) + 
+      geom_jitter(width = 0.2, alpha=0.5, aes(color = celltype)) +
+      geom_boxplot(outliers = F, alpha=0.5) +
+      theme_bw() + labs(y = ytitle, x="") + # Normalized expression? Log2? Specify
+      theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1)) + ggtitle(marker_names)
+    
+    pval <- format(res[[cluster]][marker_names, "pvalue"], digits = 2, scientific = T)
+    celltype_pval <- unique(df_melt[which(df_melt$cluster == cluster), "celltype"])
+    if(!all(is.na(ylim))){
+      plt <- plt + coord_cartesian(ylim = c(0 , ylim))
+      plt <- plt + annotate("text", label = paste("p =", pval), x=celltype_pval, y=ylim-(ylim*0.1), fill=NA)
+    }else{
+      plt <- plt + annotate("text", label = paste("p =", pval), x=celltype_pval, y=max(plt$data$value), fill=NA)
+    }
+    
+    if(!all(is.na(title))){
+      plt <- plt + ggtitle(paste(title, marker_names, sep = ": "))
+    }
+    
+    if(!all(is.na(colors))){
+      plt <- plt + scale_color_manual(values = colors) + scale_fill_manual(values = colors)
+    }
+    
+    return(plt)
+}
+
+celltype_colors <- c("0_ExcNeurons" = "#8dd1c5",
+                     "1_InhNeurons" = "#fae447",
+                     "2_Astrocytes" = "#bdb9d9",
+                     "3_OPC" = "#f47f73",
+                     "4_Microglia" = "#81b1d3",
+                     "5_Oligodendrocytes" = "#fbb464",
+                     "6_VLMC" = "#b4d66c",
+                     "7_Tcells" = "#f9cde1")
+```
+
+### HERV cell-markers examples
+```{r}
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "0", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup215", ylim = 1.5, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Exc neurons")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "0", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup1520", ylim = 1.5, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Exc neurons")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "1", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup2680",ylim = 0.1,  ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Inh neurons")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "1", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup1556",ylim = NA,  ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Inh neurons")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "2", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup1001",ylim = 2, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Astrocytes")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "5", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup2376", ylim = 5,ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Oligodendrocytes")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "3", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup2739", ylim = 1, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "OPCs")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "4", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup1359", ylim = 7.5,  ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Microglia")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "6", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup1776", ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "VLMCs")
+
+plot_topn_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_res_list, cluster = "7", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup876",ylim = 3, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "T cells")
+```
+
+### L1s cell-markers examples
+```{r}
+plot_topn_markers(df = TE_data_norm$norm_counts, res = L1_clusters_res_list, cluster = "0", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = "L1PA3_dup10072", ylim = 2, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Exc neurons")
+
+plot_topn_markers(df = TE_data_norm$norm_counts, res = L1_clusters_res_list, cluster = "1", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = "L1PA3_dup3102", ylim = 2, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Inh neurons")
+
+plot_topn_markers(df = TE_data_norm$norm_counts, res = L1_clusters_res_list, cluster = "3", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = "L1PA2_dup2091", ylim = NA, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "OPCs")
+
+plot_topn_markers(df = TE_data_norm$norm_counts, res = L1_clusters_res_list, cluster = "4", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = "L1PA3_dup7550",  ylim = 1, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Microglia")
+
+plot_topn_markers(df = TE_data_norm$norm_counts, res = L1_clusters_res_list, cluster = "5", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = "L1PA2_dup1778", ylim = 2.5, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Oligodendrocytes")
+
+plot_topn_markers(df = TE_data_norm$norm_counts, res = L1_clusters_res_list, cluster = "2", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = "L1PA2_dup1933",ylim = 4, ytitle = "log2(Normalized Expression)", colors = celltype_colors, title = "Astrocytes")
+```
+
+## Region-specific DE analysis
+### Function: `FindTEMarkers_region()`
+* Extends DESeq2 test to cluster-region combinations
+* Identifies markers enriched in specific brain regions (e.g. microglia in SN vs AMY)
+```{r}
+FindTEMarkers_region <- function(df, clusters,regions, coldata){
+  dds_list <- list()
+  res_list <- list()
+  for(c in clusters){
+    dds_list[[c]] <- list()
+    res_list[[c]] <- list()
+    for(r in regions){
+      coldata$condition <- ifelse(coldata$cluster == c & coldata$Region == r, paste("Cluster", c, ", region", r), "Other")
+      dds_list[[c]][[r]] <- DESeqDataSetFromMatrix((df[,coldata$sample_cluster]+1), coldata, design =  ~ condition)
+      dds_list[[c]][[r]]$condition <- relevel(dds_list[[c]][[r]]$condition, "Other")
+      dds_list[[c]][[r]] <- DESeq(dds_list[[c]][[r]])
+      res_list[[c]][[r]] <- results(dds_list[[c]][[r]])
+      res_list[[c]][[r]] <- as.data.frame(results(dds_list[[c]][[r]]))
+      res_list[[c]][[r]]$TE_id <- rownames(res_list[[c]][[r]])
+    }
+  }
+  return(res_list)
+}
+
+HERV_clusters_region_res_list <- FindTEMarkers_region(df = HERV_data$te_counts[unique(c(HERVs_sorted_pfc, HERVs_sorted_put, HERVs_sorted_sn, HERVs_sorted_amy)), HERV_data_norm$samplesheet$sample_cluster], clusters = as.character(0:7), regions = c("SN", "AMY", "PFC", "PUT"), coldata =  HERV_data_norm$samplesheet)
+L1_clusters_region_res_list <- FindTEMarkers_region(df = TE_data$te_counts[unique(c(L1s_sorted_pfc, L1s_sorted_put, L1s_sorted_sn, L1s_sorted_amy)), TE_data_norm$samplesheet$sample_cluster], clusters = as.character(0:7), regions = c("SN", "AMY", "PFC", "PUT"), coldata =  TE_data_norm$samplesheet)
+
+write.xlsx(HERV_clusters_region_res_list, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/HERV_markers_clusters_region_res.xlsx")
+write.xlsx(L1_clusters_region_res_list, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/L1_markers_clusters_region_res.xlsx")
+```
+
+### Function: `plot_region_markers()`
+* Plots region-specific markers for each cell type.
+* Highlights elements uniquely enriched in one region but not the others.
+```{r}
+plot_region_markers <- function(df, res, cluster, region, prefix, samplesheet, ytitle, ylim = NA, title = NA, topn = 1, colors = NA){
+    if(is.numeric(topn)){
+      signif_res <- res[[cluster]][[region]][which(res[[cluster]][[region]]$log2FoldChange > 1 & res[[cluster]][[region]]$padj < 0.05),]
+      marker_names <- rownames(signif_res[order(signif_res$log2FoldChange, signif_res$baseMean),])
+      signif_regions <- data.frame(marker = marker_names)
+      for(r in names(res[[cluster]][names(res[[cluster]]) != region])){
+        r_res <- res[[cluster]][[r]]
+        signif_regions[,r] <- r_res[marker_names, "log2FoldChange"] > 0 & r_res[marker_names, "padj"] < 0.05
+      }
+      signif_regions <- signif_regions[which(!apply(signif_regions[,-1], 1, any)),]
+      signif_res <- signif_res[signif_regions$marker,]
+      marker_names <- rownames(signif_res[order(signif_res$log2FoldChange, signif_res$baseMean)[topn],])
+    }else{
+      marker_names <- topn
+    }
+    
+    
+    df <- as.data.frame(t(df[marker_names,]))
+    for(te in colnames(df)[startsWith(colnames(df), prefix)]){
+      df[,te] <- as.numeric(df[,te])  
+    }
+    df <- merge(df, samplesheet, by.x="row.names", by.y="sample_cluster")
+    df_melt <- reshape2::melt(df[,c("Row.names", marker_names, "celltype", "Region", "cluster")], by=list(df$Row.names, df$celltype))
+    celltype <- unique(df_melt$celltype)
+    df_melt <- df_melt[which(df_melt$cluster == cluster),]
+    plt <- ggplot(df_melt, aes(x=Region, y=value, fill=Region)) + 
+      geom_jitter(width = 0.2, alpha=0.5, aes(color = Region)) +
+      geom_boxplot(outliers = F, alpha=0.5) +
+      theme_bw() + labs(y = ytitle, x="") + # Normalized expression? Log2? Specify
+      ggtitle(paste(celltype, marker_names, sep=": "))
+    pval <- format(res[[cluster]][[region]][marker_names, "pvalue"], digits = 2, scientific = T)
+    if(!all(is.na(ylim))){
+      plt <- plt + coord_cartesian(ylim = c(0 , ylim))
+      plt <- plt + annotate("text", label = paste("p =", pval), x=region, y=ylim-(ylim*0.1), fill=NA)
+    }else{
+      plt <- plt + annotate("text", label = paste("p =", pval), x=region, y=max(plt$data$value), fill=NA)
+    }
+    
+    if(!all(is.na(title))){
+      plt <- plt + ggtitle(paste(title, marker_names, sep = ": "))
+    }
+    
+    if(!all(is.na(colors))){
+      plt <- plt + scale_color_manual(values = colors) + scale_fill_manual(values = colors)
+    }
+    
+    return(plt)
+}
+```
+
+#### Some region-specific examples
+```{r}
+plot_region_markers(df = TE_data_norm$norm_counts, res = L1_clusters_region_res_list, cluster = "5",region = "SN", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = 4, ytitle = "log2(Normalized Expression)", title = "Oligodendrocytes in SN", colors = rep("lightgrey", 4))
+
+plot_region_markers(df = TE_data_norm$norm_counts, res = L1_clusters_region_res_list, cluster = "0",region = "AMY", prefix = "L1", samplesheet = TE_data_norm$samplesheet, topn = 2, ytitle = "log2(Normalized Expression)", title = "EN in Amygdala", colors = rep("lightgrey", 4))
+
+plot_region_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_region_res_list, cluster = "0", region = "PUT", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = 1,ytitle = "log2(Normalized Expression)", title = "EN in Putamen", colors = rep("lightgrey", 4))
+
+plot_region_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_region_res_list, cluster = "0", region = "PUT", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = "HERV_dup398",ytitle = "log2(Normalized Expression)", title = "EN in Putamen", colors = rep("lightgrey", 4))
+
+plot_region_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_region_res_list, cluster = "3", region = "SN", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet, topn = 1,ytitle = "log2(Normalized Expression)", title = "OPCs in SN", colors = rep("lightgrey", 4))
+
+plot_region_markers(df = HERV_data_norm$norm_counts, res = HERV_clusters_region_res_list, cluster = "3", region = "AMY", prefix = "HERV", samplesheet = HERV_data_norm$samplesheet,ylim = 0.5, topn = 1,ytitle = "log2(Normalized Expression)", title = "OPCs in AMY", colors = rep("lightgrey", 4))
+```
+
+## Outputs
+* UMAP of pseudobulk L1/HERV expression across clusters and regions.
+* Boxplots for top L1/HERV markers in each cell type.
+* Region-specific L1/HERV markers across brain regions (SN, AMY, PFC, PUT)
+
+### Notes
+* This notebook should be run *after* `TE_expression_heatmaps.Rmd`, since it uses preprocessed pseudobulk data and helper functions. 
