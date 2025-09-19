@@ -1,0 +1,1024 @@
+---
+title: "Pseudobulk TE Heatmap Visualization"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Overview 
+This notebook provides a complete workflow to generate pseudobulk heatmaps for transposable element (TE) and HERV expression in single-nucleus RNA-seq data from the ASAP PMDBS cohort. It includes functions to read and merge count matrices across brain regions, normalize counts by pseudobulk nuclei, and cluster both columns (pseudobulks) and rows (TEs) based on metadata or TE annotation. The workflow supports flexible filtering, annotation, and ordering of samples and TEs, enabling detailed visualization of TE expression patterns across cell types, brain regions, and disease status. The resulting heatmaps highlight expression trends and facilitate comparison with bulk RNA-seq measurements.
+
+### Key features include:
+* Reading TE and HERV count matrices for single or multiple brain regions.
+* Clustering columns (pseudobulks) by metadata (cell type, region, diagnosis, etc.).
+* Clustering rows (TEs) by annotation groups (e.g., TE subfamily) or expression patterns.
+* Normalization by number of nuclei per pseudobulk.
+* Optionally returning the normalized data without generating the heatmap.
+* Flexibility to filter low-abundance pseudobulks or select specific TE subsets.
+
+## 1. Load required libraries
+```{r}
+# Loading libraries
+library(data.table)
+library(ggplot2)
+library(pheatmap)
+library(RColorBrewer)
+library(ggpubr)
+library(openxlsx)
+library(tidyverse)
+library(stringr)
+```
+
+## 2. TE count data import functions
+
+### 2.1 Read TE counts for a single region
+#### Purpose:
+Reads TEs count matrices for a single brain region, across clusters. Returns a list containing:
+* `te_counts`: count matrix (TEs x pseudobulks).
+* `samplesheet`: metadata for each pseudobulk column.
+
+#### Notes:
+* Supports both RepeatMasker (TE_) and RetroTector (HERV) prefixes.
+* Merges matrices from multiple clusters for the same region.
+
+```{r}
+# Read files of a single brain region of the cohort
+# Returns a count matrix and a samplesheet for it
+read_te_counts_asap_region <- function(region, prefix=NA){
+  # Read the complete samplesheet
+  samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+  clusters <- as.character(0:7)
+  # For each of cluster
+  for(cluster in clusters){
+    print(cluster)
+    print(region)
+    # TE is the prefix for reading the TE count matrices from the repeatmasker quantification
+    # HERV is the prefix for reading the count matrices from the retrotector quantification
+    if(is.na(prefix)){
+      prefix = "TE_"
+    }else{
+      prefix = prefix
+    }
+    # If it is the first iteration, we create the matrix (te_counts)
+    if(cluster == "0"){
+      te_counts <- fread(paste("~/inbox/ASAP/trusTEr_output_vs2/",region  ,"/", prefix, "_counts_", region, "_", cluster, ".csv", sep=""), sep = ",", data.table = F)
+      # Geneid is the TE id
+      rownames(te_counts) <- te_counts$Geneid
+      # Subset the samplesheet for the brain region of interest
+      samplesheet_list_clusters <- samplesheet[which(samplesheet$Region == region),]
+      rownames(samplesheet_list_clusters) <- paste(rownames(samplesheet_list_clusters), "_", cluster, sep="")
+      # If we would keep using samplesheet, we would have one entry per sample, but it would be convenient to have one entry per pseudobulk (per column of the heatmap), so, we add a column with the cluster number and the next iteration we bind the rows
+      samplesheet_list_clusters$cluster <- cluster  
+    }else{
+      # If it's not the first iteration, we can just cbind or merge to the existing te_counts
+      # Read
+      tmp <- fread(paste("~/inbox/ASAP/trusTEr_output_vs2/",region  ,"/", prefix, "_counts_", region, "_", cluster, ".csv", sep=""), sep = ",", data.table = F)
+      # If they are sorted exactly the same way, it is safe to cbind
+      if(all(te_counts$Geneid == tmp$Geneid)){
+        te_counts <- cbind(te_counts, tmp[,7:ncol(tmp)])
+        # Otherwise we merge by TE id (significantly slower)
+      }else{
+        te_counts <- merge(te_counts, tmp[,c(1, 7:ncol(tmp))], by="Geneid")
+      }
+      rownames(te_counts) <- te_counts$Geneid
+      # We subset samplesheet
+      tmp_samplesheet <- samplesheet[which(samplesheet$Region == region),]
+      rownames(tmp_samplesheet) <- paste(rownames(tmp_samplesheet), "_", cluster, sep="")
+      # Add cluster number
+      tmp_samplesheet$cluster <- cluster  
+      # And bind to the existing (increasing) samplesheet_list_clusters
+      samplesheet_list_clusters <- rbind(samplesheet_list_clusters, tmp_samplesheet)
+    }
+  }
+  # We return a list of the count matrix and its respective samplesheet (one row per column in te_counts)
+  return(list("te_counts" = te_counts, "samplesheet" = samplesheet_list_clusters))
+}
+```
+
+### 2.2 Read TE counts accross multiple regions
+#### Purpose:
+Reads TE or HERV count matrices for a single brain region, across clusters. Returns a list containing:
+* `te_counts`: count matrix (TEs x pseudobulks).
+* `samplesheet`: metadata for each pseudobulk column.
+
+#### Notes:
+* Supports both RepeatMasker (TE_) and RetroTector (HERV) prefixes.
+* Merges matrices from multiple clusters for the same region.
+```{r}
+# We have 4 brain regions in this cohort, so it is convenient to have a wrapper to call read_te_counts_asap_region() for each of the regions
+# It inputs a vector of the regions of interest and the prefix for the matrix reading
+read_te_counts_asap_multiregion <- function(regions, prefix=NA){
+  if(length(nchar(regions)) > 1){
+    print("More than one region")
+    # For each of the regions
+    for(r in 1:length(regions)){
+      print(paste("Region", regions[r]))
+      # If it is the first iteration, we can read and create the te_counts matrix were all the results will end up in
+      if(r == 1){
+        tmp <- read_te_counts_asap_region(regions[r], prefix=prefix)  
+        te_counts <- tmp$te_counts
+        # And its samplesheet of course.
+        samplesheet <- tmp$samplesheet
+        rm(tmp)
+      }else{
+        # If it is not the first iteration, we can just check that it is ordered the same way and cbind or merge if needed 
+        tmp <- read_te_counts_asap_region(region = regions[r], prefix = prefix)  
+        if(all(te_counts$Geneid == tmp$te_counts$Geneid)){
+          te_counts <- cbind(te_counts, tmp$te_counts[,7:ncol(tmp$te_counts)]) 
+        }else{
+          te_counts <- merge(te_counts, tmp$te_counts, by=c("Geneid", "Chr", "Start", "End", "Strand", "Length"))
+        }
+        # And we add the samplesheet from the region to our original samplesheet
+        samplesheet <- rbind(samplesheet, tmp$samplesheet)
+      }
+    }
+    # We return the count matrix with all pseudobulks (of all regions specified) and all samplesheets concatenated
+    return(list("te_counts" = te_counts, "samplesheet" = samplesheet))
+  }else{
+    # If it's just one region, idk why you are calling this function, but here you go.
+    region <- unlist(regions)
+    return(read_te_counts_asap_region(region))
+  }
+}
+```
+
+## 3. Clustering Utility Functions
+
+### 3.1 Cluster columns by group
+Clusters pseudobulks (columns) based on a metadata category, e.g., celltype or region. Uses eigenvector decomposition of scaled expression for ordering and hierarchical clustering within groups.
+```{r}
+# Cluster columns in heatmap based on a category (cell type, region, etc)
+cluster_cols_by_group <- function(df, rows, group_cols, data_samplesheet, order = NA){
+  # Calculate eigen values
+    eigenvalues <- svd(t(scale(t(df))),nu=1,nv=1)$v
+    scaledExpr <- scale(t(df[rows,]))
+    averExpr <- rowMeans(scaledExpr, na.rm = TRUE)
+    if(cor(averExpr,eigenvalues) < 0){
+      eigenvalues <- -eigenvalues
+    }
+    index_eigen <- order(eigenvalues)
+    # Add group variable in samplesheet
+    # If more than one, we collapse those columns
+    if(length(group_cols) > 1){
+      data_samplesheet$Group <- apply(data_samplesheet[,group_cols,drop=F], 1, paste, collapse=' ')    
+    }else{
+      data_samplesheet$Group <- data_samplesheet[,group_cols]
+    }
+    index_reorder <- c()
+    index_pre <- c(1:length(data_samplesheet$Group))
+    # For each group
+    for(eachgroup in unique(data_samplesheet$Group)){
+      index_tempEigen <- index_eigen[index_eigen %in% index_pre[data_samplesheet$Group == eachgroup]]
+      if(length(index_tempEigen) > 1){
+        # we calculate the sample distance to each cluster of samples (in this case pseudobulks)
+        sampleDist<-dist(t(df[,index_tempEigen]), method="euclidean")
+        sampleClust <- hclust(sampleDist, method='complete')
+        index_clust <- sampleClust$order
+        if(cor(index_clust,c(1:length(index_tempEigen))) < 0){
+          index_clust <- rev(index_clust)
+        }  
+      }else{
+        index_clust <- 1
+      }
+      # Final order
+      index_reorder <- c(index_reorder,index_tempEigen[index_clust])
+    }
+    return(index_reorder)
+}
+```
+
+### 3.1 Cluster rows by group
+
+Clusters TEs (rows) based on a group category (e.g., TE subfamily/type). Similar approach as column clustering but applied to rows.
+```{r}
+# Cluster rows in heatmap based on a category (TE subfamily, etc)
+cluster_rows_by_group <- function(df, group_rows, data_TE_annotation){
+  # Calculate eigen values
+    eigenvalues <- svd(t(scale(df)),nu=1,nv=1)$v
+    scaledExpr <- scale(df)
+    averExpr <- rowMeans(scaledExpr, na.rm = TRUE)
+    if(cor(averExpr,eigenvalues) < 0){
+      eigenvalues <- -eigenvalues
+    }
+    index_eigen <- order(eigenvalues)
+    # Add group variable in samplesheet
+    # If more than one, we collapse those columns
+    
+    if(length(group_rows) > 1){
+      data_TE_annotation$Group <- apply(data_TE_annotation[,group_rows], 1, paste, collapse=' ')    
+    }else{
+      data_TE_annotation$Group <- data_TE_annotation[,group_rows]
+    }
+    index_reorder <- c()
+    index_pre <- c(1:length(data_TE_annotation$Group))
+    # For each group
+    for(eachgroup in unique(data_TE_annotation$Group)){
+      index_tempEigen <- index_eigen[index_eigen %in% index_pre[data_TE_annotation$Group == eachgroup]]
+      # we calculate the sample distance to each cluster of samples (in this case pseudobulks)
+      sampleDist<-dist(df[index_tempEigen,], method="euclidean")
+      sampleClust<-hclust(sampleDist)
+      index_clust <- sampleClust$order
+      if(cor(index_clust,c(1:length(index_tempEigen))) < 0){
+        index_clust <- rev(index_clust)
+      }
+      # Final order
+      index_reorder <- c(index_reorder,index_tempEigen[index_clust])
+    }
+    return(index_reorder)
+}
+```
+
+## 4. Main heatmap function
+
+### Purpose:
+Generates normalized pseudobulk heatmaps for TEs or HERVs.
+### Highlights:
+* Normalization by pseudobulk nuclei counts.
+* Log2 transformation and scaling.
+* Flexible clustering and ordering of columns and rows.
+* Annotation for both columns (metadata) and rows (TE types).
+* Optionally returns normalized data without plotting.
+### Key Parameters:
+* `region`: brain region(s) to analyze.
+* `tes`: vector of TE IDs to include.
+* `data`: preloaded TE/HERV data to speed up repeated heatmaps.
+* `group_cols`: cluster columns within a group category.
+* `group_rows`: cluster rows within a group category.
+* `index_reorder` / `index_row_reorder`: specify custom column/row order.
+* `filter_low_pseudocounts`: remove pseudobulks with few nuclei.
+
+Minimum arguments: brain region of interest (`region`) and TE ids as a vector (`tes`).
+
+Note: given that it can be quite slow to load the matrices to create these heatmaps, and you might make several at the time, maybe you want to consider using the parameter `data`, which expects the output of `read_te_counts_asap_multiregion()`.
+
+```{r}
+asap_heatmap_snRNA <- function(region, 
+                               tes, 
+                               return_df = F, # Dont make a heatmap, just give me the data
+                               show_rownames = F, # No ids (too large)
+                               gaps_col = NULL, # Do you need gaps in the columns
+                               gaps_row = NULL, # Do you need gaps in the rows
+                               min_expression = 10,
+                               scale = "none", # Not scaling by row by default
+                               celltype = NA, # Plot a specific cell type?
+                               data = NA, # Receive output of read_te_counts_asap_multiregion() to speed things up
+                               title = "", 
+                               group_cols = NA, # Cluster columns within a group category?
+                               group_rows = NA, # Cluster rows within a group category?
+                               prefix = NA, # Prefix for the reading of the matrix (TE or HERV)
+                               exclude_clusters = NA, # Exclude a particular cluster?
+                               index_reorder = NA, # Maybe you have already decided on the order of the columns? You can pass here their names as sample_clusters names from the samplesheets.
+                               index_row_reorder = NA, # Same for rows
+                               data_TE_annotation = NA,
+                               annotation_cols = NA,
+                               breaks = NA,
+                               order_cols_groups = NA,
+                               filter_low_pseudocounts = T
+                               ){
+  if(all(is.na(data))){ # If you havent given the data, read it
+    data <- read_te_counts_asap_multiregion(region, prefix)    
+  }
+  if(!all(is.na(exclude_clusters))){ # If you want to exclude clusters, do that now
+    data$samplesheet <- data$samplesheet[which(!data$samplesheet$cluster %in% as.character(exclude_clusters)),]
+  }
+  # We keep only the sample_clusters columns
+  tokeep <- colnames(data$te_counts)[which(!colnames(data$te_counts) %in% c("Geneid", "Chr", "Start", "End", "Strand", "Length", "TE_subfamily", "TE_family", "TE_class"))]
+  
+  # Make sample_cluster variable in samplesheet
+  data$samplesheet$sample_cluster <- paste(data$samplesheet$Sample, data$samplesheet$cluster, sep="_")
+  # Keep only those that are present in the count matrix
+  data$samplesheet <- data$samplesheet[which(data$samplesheet$sample_cluster %in% colnames(data$te_counts)),]
+  # sample_cluster is now our pseudobulk ID
+  rownames(data$samplesheet) <- data$samplesheet$sample_cluster
+  
+  if(length(nchar(region)) > 1){
+    # For each of the regions, read the number of nuclei per cluster
+    for(r in 1:length(region)){
+      if(r == 1){
+        # If it's the first iteration we can create that dataframe
+        num_nuclei <- read.table(paste("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/number_nuclei/",region[r],"_clusters.txt", sep=""), header = F, skip = 1)
+      }else{
+        # Otherwise, we can just concatenate to it
+        num_nuclei <- rbind(num_nuclei, read.table(paste("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/number_nuclei/",region[r],"_clusters.txt", sep=""), header = F, skip = 1))
+      }
+    }
+  }else{
+    # Same if it's just one region
+    num_nuclei <- read.table(paste("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/number_nuclei/",region, "_clusters.txt", sep=""), header = F, skip = 1)
+  }
+  
+  colnames(num_nuclei) <- c("cluster", "num_nuclei")
+  # There is a "total" row. I'll remove that for convenience
+  num_nuclei <- num_nuclei[which(num_nuclei$cluster != "total"),]
+  rownames(num_nuclei) <- num_nuclei$cluster
+  
+  if(filter_low_pseudocounts){
+    # Just keep pseudobulks with at least 50 nuclei (arbitrary)
+    num_nuclei <- num_nuclei[which(num_nuclei$num_nuclei > 50),] # Remove tiny pseudobulks
+  }
+  
+  # From all samples_clusters
+  samples_clusters <- colnames(data$te_counts[,data$samplesheet$sample_cluster])
+  # Remove those that we dont have number of nuclei information from (tiny pseudobulks which we removed from the num_nuclei dataframe)
+  samples_clusters <- samples_clusters[which(samples_clusters %in% num_nuclei$cluster)]
+  
+  # Make a copy of the count matrix with only those samples_clusters (pseudobulks)
+  te_counts_norm_num <- data$te_counts[tes,samples_clusters]
+  # We take note of the expressed elements, if an element is not expressed, this will result in NA and we will get an error later, so, let's remove that
+  expressed_rows <- rownames(te_counts_norm_num)[which(rowSums(te_counts_norm_num) > min_expression)]
+  te_counts_norm_num <- te_counts_norm_num[expressed_rows,]
+  # Normalize counts by number of nuclei in cluster
+  te_counts_norm_num[] <- mapply('/', te_counts_norm_num[,samples_clusters], num_nuclei[samples_clusters,"num_nuclei"])
+  te_counts_norm_num$TE_id <- rownames(te_counts_norm_num)
+  
+  # Add cell type information to samplesheet
+  data$samplesheet$celltype <- ifelse(data$samplesheet$cluster == "0", "0_ExcNeurons", 
+                                      ifelse(data$samplesheet$cluster == "1", "1_InhNeurons", 
+                                             ifelse(data$samplesheet$cluster == "2", "2_Astrocytes", 
+                                                    ifelse(data$samplesheet$cluster == "3", "3_OPC", 
+                                                           ifelse(data$samplesheet$cluster == "4", "4_Microglia", 
+                                                                  ifelse(data$samplesheet$cluster == "5", "5_Oligodendrocytes", 
+                                                                         ifelse(data$samplesheet$cluster == "6", "6_VLMC", 
+                                                                                ifelse(data$samplesheet$cluster == "7", "7_Tcells", "Other?"))))))))
+  
+  # A simplified version of that
+  data$samplesheet <- data$samplesheet %>% 
+    mutate(celltype_simple = ifelse(celltype %in% c("0_ExcNeurons", "1_InhNeurons"), "Neurons", ifelse(celltype %in% c("2_Astrocytes","5_Oligodendrocytes", "3_OPC"), "Glia", "Microglia")))
+  
+  data$samplesheet <- data$samplesheet[order(data$samplesheet$celltype_simple, data$samplesheet$celltype, data$samplesheet$Region, data$samplesheet$Dx),]
+  
+  # If you want to just look at one cell type (cluster), we can just keep those 
+  if(!is.na(celltype)){
+    data$samplesheet <- data$samplesheet[which(data$samplesheet$cluster == celltype),] 
+    te_counts_norm_num <- te_counts_norm_num[, which(colnames(te_counts_norm_num) %in% data$samplesheet$sample_cluster)]
+  }
+  
+  # Let's clean the samplesheet to the columns we are going to be focusing on (no tiny pseudobulks, no clusters we are not interested in)
+  data$samplesheet <- data$samplesheet[which(data$samplesheet$sample_cluster %in% colnames(te_counts_norm_num)),]
+  # Scale (x1000) and log2 with a 1 as pseudocount
+  data_heatmap <- log2(te_counts_norm_num[which(rownames(te_counts_norm_num) %in% tes),data$samplesheet$sample_cluster]*1000+1) # Here i just changed te_counts_norm_num$TE_id for rownames(te_counts_norm_num)
+  
+  # If we want to cluster columns by a particular group/category, here is where that happens
+  # If we dont, we simply set cluster_cols as TRUE
+  if(all(is.na(group_cols))){
+    cluster_cols = TRUE
+  }else{
+    # If we have a defined order we want to have, cool, we go to the else of this condition, 
+    # Otherwise, we need to cluster groups
+    if(all(is.na(index_reorder))){
+      # Set cluster_cols as FALSE
+      cluster_cols = FALSE
+      index_reorder <- cluster_cols_by_group(df = data_heatmap, rows= expressed_rows, group_cols = group_cols, data_samplesheet = data$samplesheet, order = order_cols_groups)
+      data$samplesheet$index_orig <- 1:nrow(data$samplesheet)
+      tmp <- data$samplesheet[index_reorder,]
+      tmp_split <- split(tmp, f = tmp[,group_cols])
+      tmp <- do.call(rbind, tmp_split[order_cols_groups])
+      index_reorder <- tmp$index_orig
+    }
+    # Save that order to return 
+    index_sample_clusters <- data$samplesheet[index_reorder,"sample_cluster"]
+    data$samplesheet <- data$samplesheet[index_reorder,]
+  }
+  
+  # Order data for heatmap
+  data_heatmap <- data_heatmap[,data$samplesheet$sample_cluster]
+  # Merge with num_nuclei to add that annotation at the top of the heatmap
+  data$samplesheet <- merge(data$samplesheet, num_nuclei, by.x="sample_cluster", by.y="cluster")
+  rownames(data$samplesheet) <- data$samplesheet$sample_cluster
+  
+  if(all(is.na(group_rows))){
+    cluster_rows = FALSE
+  }else{
+    cluster_rows = FALSE
+    if(all(is.na(index_row_reorder))){
+      data_TE_annotation <- data_TE_annotation[which(data_TE_annotation$TE_id %in% rownames(data_heatmap)),]
+      index_TE_id <- cluster_rows_by_group(df = data_heatmap, group_rows = "type", data_TE_annotation = data_TE_annotation)
+      # If we are clustering per group, let's order data for heatmap and the annotation for TEs
+      data_TE_annotation <- data_TE_annotation[index_TE_id,]
+      data_heatmap <- data_heatmap[as.character(data_TE_annotation$TE_id),]
+      index_row_reorder <- rownames(data_heatmap)
+      gaps_row <- which(!duplicated(data_TE_annotation$type))[-1]-1 # Add a gap between groups
+    }else{
+      data_heatmap <- data_heatmap[index_row_reorder,]
+      cluster_rows = FALSE
+    }
+  }
+  
+  # If you dont want a heatmap, here goes the data
+  if(return_df){
+    return(list("norm_counts" = te_counts_norm_num,
+                "samplesheet" = data$samplesheet))
+  }else{
+    # If you do want a heatmap, here it comes (and the order of the columns, in case you need it for later)
+    getPalette = colorRampPalette(brewer.pal(11, "RdYlBu"))
+    col.pal <- rev(getPalette(60))[8:60]
+    return(list("heatmap" = pheatmap(data_heatmap, 
+                    show_rownames = show_rownames,
+                    annotation_col = data$samplesheet[,c("celltype", "celltype_simple", "Dx", "Region")],
+                    show_colnames = F, 
+                    cluster_rows = cluster_rows,
+                    cluster_cols = cluster_cols,
+                    gaps_col = gaps_col,
+                    gaps_row = gaps_row,
+                    border_color = NA, 
+                    breaks = breaks,
+                    color = col.pal,
+                    scale = scale,
+                    annotation_row = data_TE_annotation[,"type", drop=F],
+                    annotation_colors = annotation_cols,
+                    main = title),
+           "order_cols" = index_sample_clusters,
+           "order_rows" = index_row_reorder))  
+  }
+}
+```
+
+## 5. Column annotation colors
+
+Defines colors for:
+* Brain region
+* Simplified cell type (celltype_simple)
+* Cell type
+* Diagnosis (PD vs. control)
+* TE type (L1 vs. HERV)
+
+These are used in heatmap column and row annotations.
+
+```{r}
+annotation_cols <- list("Region" = c("SN" = "#46c8e8",
+                                                          "PUT" = "#ed9924",
+                                                          "PFC" = "#db84da",
+                                                          "AMY" = "#7ac47c"),
+                                             "celltype_simple" = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "#e0e0e0"),
+                                             "celltype" = c("0_ExcNeurons" = "#80e8d8",
+                                                            "1_InhNeurons" = "#f5be51",
+                                                            "2_Astrocytes" = "#c69deb",
+                                                            "3_OPC" = "#f55d42",
+                                                            "4_Microglia" = "#688db3",
+                                                            "5_Oligodendrocytes" = "#ed8337",
+                                                            "6_VLMC" = "#7bbd75",
+                                                            "7_Tcells" = "#eb7878"),
+                                             "Dx" = c("PD" = "#8fd9ca",
+                                                      "Ctl" = "lightgrey"),
+                                             "type" = c("only" = "#a0dbb0",
+                                                        "put" = "#388db3"))
+```
+
+## 6. Read expressed TE IDs
+
+Load TEs that were detected as expressed in deep bulk RNAseq for each brain region.
+
+```{r}
+# L1s
+L1s_sorted_pfc <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PFC.tab")$V1
+L1s_sorted_put <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PUT.tab")$V1
+L1s_sorted_sn <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_SN.tab")$V1
+L1s_sorted_amy <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_AMY.tab")$V1
+
+# HERVs
+HERVs_sorted_pfc <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PFC.tab")$V1
+HERVs_sorted_put <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PUT.tab")$V1
+HERVs_sorted_sn <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_SN.tab")$V1
+HERVs_sorted_amy <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_AMY.tab")$V1
+```
+
+## 7. Read count matrices 
+
+Load and merge TE (repeatmasker counts) and HERV (retrotector counts) pseudobulk matrices across brain regions for heatmaps.
+```{r}
+# Read count matrices
+TE_data <- read_te_counts_asap_multiregion(regions = c("SN", "PUT", "PFC", "AMY"), prefix = "TE")
+HERV_data <- read_te_counts_asap_multiregion(regions = c("SN", "PUT", "PFC", "AMY"), prefix = "HERV")
+
+# Row binding of HERVs to the repeatmasker count matrix
+TE_data$te_counts <- rbind(TE_data$te_counts[,colnames(TE_data$te_counts)], HERV_data$te_counts[,colnames(TE_data$te_counts)])
+```
+
+## 8. Generate heatmaps
+
+### 8.1 Combine TE IDs across regions
+
+Prepare TE IDs and row annotations for plotting heatmaps across all regions
+```{r}
+# All together to share scale
+tes <- unique(c(HERVs_sorted_pfc, HERVs_sorted_put, HERVs_sorted_sn, HERVs_sorted_amy, L1s_sorted_pfc, L1s_sorted_put, L1s_sorted_sn, L1s_sorted_amy))
+data_TE_annotation <- data.frame("TE_id" = tes,
+                                 "type" = ifelse(startsWith(tes, "HERV"), "HERV", "L1"))
+rownames(data_TE_annotation) <- data_TE_annotation$TE_id
+order_cols_celltype <- c("0_ExcNeurons", "1_InhNeurons", "2_Astrocytes", "3_OPC", "5_Oligodendrocytes", "4_Microglia", "6_VLMC", "7_Tcells")
+# Save the heatmap to extract the row order
+annotation_cols$type <- NULL
+```
+
+### 8.2 Pseudobulk heatmaps sorted by expression levels
+
+* Heatmap visualization of expressed >6kbp L1HS-L1PA3 and HERVs on pseudobulks with more than 50 nuclei (line 318).
+* `index_row_reorder` is set to the ranked TE list based on expression values in the specific brain region (max to min expression). 
+* Excluded clusters 6 (VLMC) and 7 (Tcells) due to low number of nuclei.
+```{r}
+asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   index_row_reorder = c(L1s_sorted_pfc),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PFC L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+
+asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   index_row_reorder = c(L1s_sorted_put),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PUT L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+
+asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"),
+                   index_row_reorder = c(L1s_sorted_amy),
+                   order_cols_groups = order_cols_celltype,
+                   title = "AMY L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+
+asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   index_row_reorder = c(L1s_sorted_sn),
+                   order_cols_groups = order_cols_celltype,
+                   title = "SN L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+
+asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   index_row_reorder = c(HERVs_sorted_pfc),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PFC HERV: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+
+asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   index_row_reorder = c(HERVs_sorted_put),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PUT HERV: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+
+asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   index_row_reorder = c(HERVs_sorted_amy),
+                   order_cols_groups = order_cols_celltype,
+                   title = "AMY HERV: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+
+asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   index_row_reorder = c(HERVs_sorted_sn),
+                   order_cols_groups = order_cols_celltype,
+                   title = "SN HERV: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   annotation_cols = annotation_cols)
+```
+
+### 8.2 Pseudobulk heatmaps clustering rows
+
+* Heatmap visualization of expressed >6kbp L1HS-L1PA3 and HERVs on pseudobulks with more than 50 nuclei (line 318).
+* Rows are clustered using a hierarchical clustering method within `pheatmap`.
+* Excluded clusters 6 (VLMC) and 7 (Tcells) due to low number of nuclei.
+
+I wanted to have the heatmaps of L1s and HERVs *stacked* but not mixed, so I'm collecting the order of the row clustering in a variable of shape `heatmap_[region]_[TE]_order`.
+```{r}
+heatmap_pfc_L1 <- asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   group_rows = c("type"),
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PFC L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_pfc_L1_order <- heatmap_pfc_L1$order_rows
+
+heatmap_pfc_HERV <- asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   group_rows = c("type"),
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PFC HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_pfc_HERV_order <- heatmap_pfc_HERV$order_rows
+
+heatmap_put_L1 <- asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   group_rows = c("type"),
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PUT L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_put_L1_order <- heatmap_put_L1$order_rows
+
+heatmap_put_HERV <- asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   group_rows = c("type"),
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PUT HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_put_HERV_order <- heatmap_put_HERV$order_rows
+
+heatmap_sn_L1 <- asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   group_rows = c("type"),
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "SN L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_sn_L1_order <- heatmap_sn_L1$order_rows
+
+heatmap_sn_HERV <- asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   group_rows = c("type"),
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "SN HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_sn_HERV_order <- heatmap_sn_HERV$order_rows
+
+heatmap_amy_L1 <- asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = F, 
+                   group_rows = c("type"),
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "AMY L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_amy_L1_order <- heatmap_amy_L1$order_rows
+
+heatmap_amy_HERV <- asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = F, 
+                   group_rows = c("type"),
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "AMY HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+heatmap_amy_HERV_order <- heatmap_amy_HERV$order_rows
+
+```
+
+#### Figure stacked heatmaps
+I'm using the variables `heatmap_[region]_[TE]_order` to stack the L1 and HERV heatmaps on top of each other. These are the heatmaps shown in figure 3.
+
+```{r}
+asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = F, group_rows = c("type"), 
+                   gaps_row = length(heatmap_pfc_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_pfc_HERV_order,heatmap_pfc_L1_order),
+                   order_cols_groups = order_cols_celltype,
+                   data = TE_data, group_cols = c("celltype"),
+                   title = "PFC HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = F, group_rows = c("type"), gaps_row = length(heatmap_put_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_put_HERV_order,heatmap_put_L1_order),
+                   order_cols_groups = order_cols_celltype,
+                   data = TE_data, group_cols = c("celltype"),
+                   title = "PUT HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = F, group_rows = c("type"), gaps_row = length(heatmap_amy_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_amy_HERV_order,heatmap_amy_L1_order),
+                   order_cols_groups = order_cols_celltype,
+                   data = TE_data, group_cols = c("celltype"),
+                   title = "AMY HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = F, group_rows = c("type"), gaps_row = length(heatmap_sn_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_sn_HERV_order,heatmap_sn_L1_order),
+                   order_cols_groups = order_cols_celltype,
+                   data = TE_data, group_cols = c("celltype"),
+                   title = "SN HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+```
+
+#### Tables of stacked heatmaps
+
+If there is anyone interested, I've also saved these matrices to keep the order in which they are shown in figure (`return_df = T`) to `./ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/`. 
+```{r}
+heatmap_pfc <- asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = T, group_rows = c("type"), gaps_row = length(heatmap_pfc_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_pfc_HERV_order,heatmap_pfc_L1_order),
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PFC HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_put <- asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = T, group_rows = c("type"), gaps_row = length(heatmap_put_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_put_HERV_order,heatmap_put_L1_order),
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PUT HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_amy <- asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = T, group_rows = c("type"), gaps_row = length(heatmap_amy_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_amy_HERV_order,heatmap_amy_L1_order),
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "AMY HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_sn <- asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation$TE_id, 
+                   return_df = T, group_rows = c("type"), gaps_row = length(heatmap_sn_HERV_order),
+                   breaks = seq(0,15,length.out = 52), index_row_reorder = c(heatmap_sn_HERV_order,heatmap_sn_L1_order),
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "SN HERVs + L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_sn$norm_counts <- merge(TE_data$te_counts[,c("Geneid", "Chr", "Start", "End", "Strand", "Length")], heatmap_sn$norm_counts, by.y="TE_id", by.x="Geneid")
+heatmap_pfc$norm_counts <- merge(TE_data$te_counts[,c("Geneid", "Chr", "Start", "End", "Strand", "Length")], heatmap_pfc$norm_counts, by.y="TE_id", by.x="Geneid")
+heatmap_put$norm_counts <- merge(TE_data$te_counts[,c("Geneid", "Chr", "Start", "End", "Strand", "Length")], heatmap_put$norm_counts, by.y="TE_id", by.x="Geneid")
+heatmap_amy$norm_counts <- merge(TE_data$te_counts[,c("Geneid", "Chr", "Start", "End", "Strand", "Length")], heatmap_amy$norm_counts, by.y="TE_id", by.x="Geneid")
+
+write.table(heatmap_sn$norm_counts, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_SN_FL_HERVs_L1HS_PA3_expressed_bulk_celltype_cluster.tab", sep = ",", quote = F, col.names = T, row.names = F)
+write.table(heatmap_pfc$norm_counts, "/Volumes/MyPassport//ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_PFC_FL_HERVs_L1HS_PA3_expressed_bulk_celltype_cluster.tab", sep = ",", quote = F, col.names = T, row.names = F)
+write.table(heatmap_put$norm_counts, "/Volumes/MyPassport//ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_PUT_FL_HERVs_L1HS_PA3_expressed_bulk_celltype_cluster.tab", sep = ",", quote = F, col.names = T, row.names = F)
+write.table(heatmap_amy$norm_counts, "/Volumes/MyPassport//ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_AMY_FL_HERVs_L1HS_PA3_expressed_bulk_celltype_cluster.tab", sep = ",", quote = F, col.names = T, row.names = F)
+
+```
+
+#### Box plots of L1 expression from heatmaps
+
+These matrices also helped to make the boxplots from the same figures (to compare expression between neurons, glia and microglia). We just need to retrieve them per element type (L1/HERVs).
+
+```{r}
+heatmap_pfc_L1 <- asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PFC L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_put_L1 <- asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PUT L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_sn_L1 <- asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "SN L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_amy_L1 <- asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "L1"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "AMY L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+
+merge(data.frame(L1_sum = colMeans(heatmap_pfc_L1$norm_counts[,-ncol(heatmap_pfc_L1$norm_counts)])),
+      heatmap_pfc_L1$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=L1_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("PFC >6kbp L1HS-PA3 ")
+
+merge(data.frame(L1_sum = colMeans(heatmap_put_L1$norm_counts[,-ncol(heatmap_put_L1$norm_counts)])),
+      heatmap_put_L1$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=L1_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("PUT >6kbp L1HS-PA3 ")
+
+merge(data.frame(L1_sum = colMeans(heatmap_sn_L1$norm_counts[,-ncol(heatmap_sn_L1$norm_counts)])),
+      heatmap_sn_L1$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=L1_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("SN >6kbp L1HS-PA3 ")
+
+merge(data.frame(L1_sum = colMeans(heatmap_amy_L1$norm_counts[,-ncol(heatmap_amy_L1$norm_counts)])),
+      heatmap_amy_L1$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=L1_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("AMY >6kbp L1HS-PA3 ")
+```
+
+
+#### Box plots of HERV expression from heatmaps
+
+Same method for HERVs!
+```{r}
+heatmap_amy_HERV <- asap_heatmap_snRNA(region = c("AMY"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 60), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "AMY HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_pfc_HERV <- asap_heatmap_snRNA(region = c("PFC"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 60), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PFC HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_put_HERV <- asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 60), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "PUT HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+heatmap_sn_HERV <- asap_heatmap_snRNA(region = c("SN"), 
+                   tes = data_TE_annotation[which(data_TE_annotation$type == "HERV"),"TE_id"], 
+                   return_df = T, 
+                   breaks = seq(0,15,length.out = 60), 
+                   data = TE_data, group_cols = c("celltype"),
+                   order_cols_groups = order_cols_celltype,
+                   title = "SN HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation,
+                   exclude_clusters = c(6, 7))
+
+
+merge(data.frame(HERV_sum = colMeans(heatmap_pfc_HERV$norm_counts[,-ncol(heatmap_pfc_HERV$norm_counts)])),
+      heatmap_pfc_HERV$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=HERV_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("PFC HERVs ")
+
+merge(data.frame(HERV_sum = colMeans(heatmap_put_HERV$norm_counts[,-ncol(heatmap_put_HERV$norm_counts)])),
+      heatmap_put_HERV$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=HERV_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("PUT HERVs ")
+
+merge(data.frame(HERV_sum = colMeans(heatmap_sn_HERV$norm_counts[,-ncol(heatmap_sn_HERV$norm_counts)])),
+      heatmap_sn_HERV$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=HERV_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("SN HERVs ")
+
+merge(data.frame(HERV_sum = colMeans(heatmap_amy_HERV$norm_counts[,-ncol(heatmap_amy_HERV$norm_counts)])),
+      heatmap_amy_HERV$samplesheet, by="row.names") %>% 
+  mutate(celltype_simple = fct_relevel(celltype_simple,c("Neurons","Glia","Microglia"))) %>%
+  ggplot(aes(x=celltype_simple, y=HERV_sum, color = celltype_simple)) + geom_jitter(height = 0, width = 0.4) + 
+  geom_boxplot(width=0.5, alpha = 0.5, outliers = F) + 
+  theme_bw() + theme(legend.position = "None") + scale_color_manual(values = c("Neurons" = "#a0dbb0",
+                                                                   "Glia" = "#a1a8e6",
+                                                                   "Microglia" = "grey")) + 
+  labs(y="log2(Pseudobulk normalized\nmean expression)", x="", color="") + stat_compare_means(comparisons = list(c("Neurons", "Microglia"), c("Neurons", "Glia"), c("Microglia", "Glia")), method = "t.test") + ggtitle("AMY HERVs ")
+```
+
+---
+
+## 9. Negative controls
+
+Important to validate that our method is not picking up noise. Here we plot elements which were not found to be expressed in our deep bulk RNAseq data. 
+
+* Heatmap visualization of >6kbp L1HS-L1PA3 and HERVs which were *NOT* found to be expressed in bulk RNAseq.
+* Excluded clusters 6 (VLMC) and 7 (Tcells) due to low number of nuclei.
+
+```{r}
+# L1s
+L1s_notexpressed <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/not_expressed_FL_L1HS_L1PA3.tab")$V1
+# HERVs
+HERVs_notexpressed <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/not_expressed_fl_hervs.tab")$V1
+
+data_TE_annotation <- data.frame("TE_id" = c(L1s_notexpressed, HERVs_notexpressed),
+                                 "type" = ifelse(startsWith(c(L1s_notexpressed, HERVs_notexpressed), "HERV"), "HERV", "L1"))
+rownames(data_TE_annotation) <- data_TE_annotation$TE_id
+
+asap_heatmap_snRNA(region = c("PFC", "PUT", "AMY", "SN"), 
+                   tes = HERVs_notexpressed, 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52), 
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   order_cols_groups = order_cols_celltype,
+                   title = "Not expressed HERVs: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation)
+
+
+asap_heatmap_snRNA(region = c("PFC", "PUT", "AMY", "SN"), 
+                   tes = L1s_notexpressed, 
+                   return_df = F, 
+                   breaks = seq(0,15,length.out = 52),
+                   data = TE_data, 
+                   group_cols = c("celltype"), 
+                   order_cols_groups = order_cols_celltype,
+                   title = "Not expressed L1s: >50 nuclei pseudobulks", data_TE_annotation = data_TE_annotation)
+
+```
+
+
+---
+
+I will need some of these objects for DE_TE_heatmaps.Rmd, so I'll save them here
+```{r}
+# Save data objects needed for DE analysis
+save(TE_data, HERV_data, data_TE_annotation, file = "preprocessed_TE_data.RData")
+
+# Save functions in a separate file
+dump(
+  c("read_te_counts_asap_region", "read_te_counts_asap_multiregion", 
+    "cluster_cols_by_group", "cluster_rows_by_group", "asap_heatmap_snRNA"), 
+  file = "TE_heatmap_functions.R"
+)
+```
+
