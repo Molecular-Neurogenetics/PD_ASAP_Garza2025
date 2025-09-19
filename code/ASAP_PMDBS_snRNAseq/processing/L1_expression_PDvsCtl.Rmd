@@ -1,0 +1,330 @@
+---
+title: "Cell-Type Specific L1s Differential Expression Analysis"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Overview 
+
+This notebook performs differential expression analysis of human endogenous retroviruses (L1s) across cell-type clusters and brain regions from ASAP PMDBS snRNA-seq data.
+
+Specifically, it:
+* Defines helper functions for extracting significant genes and visualizing expression (custom getSignName, getAverage, meanPlot_cus, and box_pseudobulk).
+* Loads TE (L1s) count data generated from trusTEr outputs and organizes them by region and cluster.
+* Builds DESeq2 models to compare PD vs. control expression across multiple clusters.
+* Produces summary tables of DE results, mean expression plots, and box plots for selected example L1s.
+* Identifies overlaps of upregulated L1s across cell types and regions using UpSet plots.
+* Compares in vivo upregulated L1s in microglia with in vitro stimulation experiments.
+
+## Set up
+Loading data and needed libraries
+```{r}
+library(UpSetR)
+library(DESeq2)
+library(data.table)
+library(grid)
+library(ggpubr)
+library(ggplot2)
+library(tidyverse)
+library(openxlsx)
+
+load("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/preprocessed_TE_data.RData")
+source("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/TE_DEA_functions.R")
+source("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/TE_heatmap_functions.R")
+# Load samplesheet
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+# I want to split TE_data$te_counts per region, but first I need to categorize the columns by region
+clusters <- colnames(TE_data$te_counts)[7:ncol(TE_data$te_counts)]
+clusters_per_region <- data.frame(cluster = clusters,
+                                  region = str_extract(clusters, "SN|PUT|PFC|AMY")) %>%
+  group_by(region) %>%
+  summarise(clusters = list(cluster)) %>%
+  ungroup()
+
+expressed_L1s_bulkrna <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed.tab", data.table = F, header = F)$V1
+# Now we loop through the regions and select only the region's columns
+te_counts <- list()
+for (i in 1:nrow(clusters_per_region)) {
+  region <- clusters_per_region$region[i]
+  cluster_cols <- clusters_per_region$clusters[[i]] # these are vectors of column names
+  # Subset counts dataframe by these columns and keep Geneid
+  te_counts[[region]] <- TE_data$te_counts %>%
+    select(Geneid, all_of(cluster_cols)) %>%
+    filter(Geneid %in% expressed_L1s_bulkrna) # Expressed in bulk RNA
+}
+
+head(te_counts$SN)
+```
+
+## 2. Differential Expression Analysis (DEA) with DESeq2
+
+* Build DESeq2 datasets for each region-cluster combination
+* Compare PD vs. Control, apply shrinkage (lfcShrink)
+* Save results as excel tables (clean data)
+
+```{r}
+te_dds_list <- list()
+te_exp_list <- list()
+te_res_list <- list()
+te_res_list_df <- list()
+regions <- c("SN", "PUT", "PFC", "AMY")
+for(cluster in as.character(0:7)){
+  for(region in regions){
+    print(cluster)
+    print(region)
+    samplesheet_list <- split(samplesheet, f = samplesheet$Region)
+    rownames(samplesheet_list[[region]]) <- samplesheet_list[[region]]$Sample
+    samples_cluster <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+    samples_cluster <- samples_cluster[which(samples_cluster %in% colnames(te_counts[[region]]))]
+    rownames(samplesheet_list[[region]]) <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+    # Expressed in snRNA
+    te_counts_expressed <- te_counts[[region]][which(rowSums(te_counts[[region]][,samples_cluster]) > 0),]
+    print(paste0("Cluster ", cluster, ", region ", region, " expresses ", nrow(te_counts_expressed)))
+    
+    region_cluster <- paste0(region, "_", cluster)
+    te_dds_list[[region_cluster]] <- DESeqDataSetFromMatrix((te_counts_expressed[,samples_cluster]+1), samplesheet_list[[region]][samples_cluster,], design =  ~ Dx)
+    te_dds_list[[region_cluster]]$Dx <- relevel(te_dds_list[[region_cluster]]$Dx, "Ctl")
+    error_handle <- tryCatch({
+      te_dds_list[[region_cluster]] <- DESeq(te_dds_list[[region_cluster]])
+    }, error = function(e) {
+      print(paste("Something happened with ", region, cluster))
+      return(1)
+    })
+    if(is.numeric(error_handle)){
+      if(error_handle == 1){
+        te_dds_list[[region_cluster]] <- NA
+        te_res_list[[region_cluster]] <- NA
+        te_res_list_df[[region_cluster]] <- NA
+        te_exp_list[[region_cluster]] <- NA
+      }
+    }else{
+      te_exp_list[[region_cluster]] <- getAverage(te_dds_list[[region_cluster]])
+      te_res_list[[region_cluster]] <- lfcShrink(te_dds_list[[region_cluster]], "Dx_PD_vs_Ctl")
+      te_res_list_df[[region_cluster]] <- as.data.frame(te_res_list[[region_cluster]])
+      te_res_list_df[[region_cluster]]$L1s_id <- rownames(te_res_list_df[[region_cluster]])
+    }
+  }
+}
+
+openxlsx::write.xlsx(te_res_list_df, paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/L1s_PDvsCtl_res.xlsx", sep=""))
+```
+
+## 3. Mean expression scatter plots
+
+* Generate mean expression scatter plots with custom plotting function (`meanPlot_cus()`)
+* Visualize PD vs. Control per region-cluster
+
+```{r}
+mean_plots_list <- list()
+te_res_expressed_list_df <- list()
+
+for(region_cluster in names(te_exp_list)){
+    if(!all(is.na(te_res_list[[region_cluster]]))){
+      region <- sapply(str_split(region_cluster, "_"), `[[`, 1)
+      effect <- unique(samplesheet_list[[region]][which(samplesheet_list[[region]]$Dx != "Ctl"),"Dx"])
+      
+      colors_list <- pick_colors_meanplot(te_res_list[[region_cluster]])
+      mean_plots_list[[region_cluster]] <- meanPlot_cus(exp = te_exp_list[[region_cluster]]$Mean,
+                                                        test = te_res_list[[region_cluster]], 
+                                                        col1=colors_list$col1, col2=colors_list$col2, col3=colors_list$col3,
+                                                        c1 = effect, c2="Ctl", p = 0.05, l=1, ttl = region_cluster, repel = F)
+    }
+}
+
+# Neurons (cluster 0): 
+# Very little number of nuclei in SN in this cluster - ignored
+mean_plots_list$PUT_0 
+mean_plots_list$PFC_0 
+mean_plots_list$AMY_0 
+# Neurons (cluster 1)
+mean_plots_list$PUT_1 
+mean_plots_list$PFC_1 
+mean_plots_list$AMY_1 
+# Astrocytes
+mean_plots_list$SN_2 
+mean_plots_list$PUT_2
+mean_plots_list$PFC_2 
+mean_plots_list$AMY_2
+# OPCs
+mean_plots_list$SN_3
+mean_plots_list$PUT_3
+mean_plots_list$PFC_3 
+mean_plots_list$AMY_3
+# Microglia
+mean_plots_list$SN_4
+mean_plots_list$PUT_4
+mean_plots_list$PFC_4 
+mean_plots_list$AMY_4 
+# Oligodendrocytes
+mean_plots_list$SN_5
+mean_plots_list$PUT_5
+mean_plots_list$PFC_5
+mean_plots_list$AMY_5
+
+# VLMCs and Tcells skipped as their clusters are too small 
+```
+
+## 4. Box plots
+
+* Plot normalized expression distributions of selected L1s across Dx and regions (one point per sample)
+* Annotate with p-values and log2FC from DESeq2 results
+
+```{r}
+L1s_counts_norm <- list()
+for(region_cluster in names(te_dds_list)){
+  L1s_counts_norm[[region_cluster]] <- list()
+  error_handle <- tryCatch({
+      L1s_counts_norm[[region_cluster]] <- counts(te_dds_list[[region_cluster]], normalize = T)
+    }, error = function(e) {
+      print(paste("Something happened with ", region_cluster))
+      return(1)
+    })
+}
+
+samplesheet_list[["SN"]]$sample_cluster <- paste(samplesheet_list$SN$Sample, "4", sep="_")
+samplesheet_list[["PUT"]]$sample_cluster <- paste(samplesheet_list$PUT$Sample, "4", sep="_")
+
+plot_list_sn <- list()
+plot_list_put <- list()
+for (L1s in te_res_list_df$SN_4[which(te_res_list_df$SN_4$padj < 0.05 & te_res_list_df$SN_4$log2FoldChange > 0),"TE_id"]){
+  plot_list_sn[[L1s]] <- box_pseudobulk(df = L1s_counts_norm$SN_4,res =  te_res_list_df$SN_4,gene =  L1s, log2=F)
+  plot_list_put[[L1s]] <- box_pseudobulk(df = L1s_counts_norm$PUT_4, te_res_list_df$PUT_4, L1s, log2=F)
+}
+
+box_pseudobulk(df = L1s_counts_norm$SN_4, te_res_list_df$SN_4, "L1PA2_dup1272", log2=T)
+box_pseudobulk(df = L1s_counts_norm$PUT_4, te_res_list_df$PUT_4, "L1PA2_dup1272", log2=T)
+box_pseudobulk(df = L1s_counts_norm$PFC_4, te_res_list_df$PFC_4, "L1PA2_dup1272", log2=T)
+box_pseudobulk(df = L1s_counts_norm$AMY_4, te_res_list_df$AMY_4, "L1PA2_dup1272", log2=T)
+
+box_pseudobulk(df = L1s_counts_norm$SN_4, te_res_list_df$SN_4, "L1PA3_dup8310", log2=T)
+box_pseudobulk(df = L1s_counts_norm$PUT_4, te_res_list_df$PUT_4, "L1PA3_dup8310", log2=T)
+box_pseudobulk(df = L1s_counts_norm$PFC_4, te_res_list_df$PFC_4, "L1PA3_dup8310", log2=T)
+box_pseudobulk(df = L1s_counts_norm$AMY_4, te_res_list_df$AMY_4, "L1PA3_dup8310", log2=T)
+
+box_pseudobulk(df = L1s_counts_norm$SN_4, te_res_list_df$SN_4, "L1PA3_dup6434", log2=T)
+box_pseudobulk(df = L1s_counts_norm$PUT_4, te_res_list_df$PUT_4, "L1PA3_dup6434", log2=T)
+box_pseudobulk(df = L1s_counts_norm$PFC_4, te_res_list_df$PFC_4, "L1PA3_dup6434", log2=T)
+box_pseudobulk(df = L1s_counts_norm$AMY_4, te_res_list_df$AMY_4, "L1PA3_dup6434", log2=T)
+
+```
+
+## 5. Intersection of upregulated L1s
+
+* Extract significantly upregulated L1s (padj < 0.05, log2FC > 1)
+* Use UpSetR to visualize overlaps across cell types and regions
+* Separate plots for Astrocytes, Microglia, OPCs, Oligos, Neurons comparisons
+
+```{r}
+get_significant_L1s <- function(df){
+  det <- df[which(df$padj < 0.05 & df$log2FoldChange > 1), "TE_id"]
+  if (length(det) > 0){
+    return(det)  
+  }else{
+    return(NA)
+  }
+}
+
+# Astrocytes
+upset(fromList(sapply(list("SN_2" = te_res_list_df$SN_2,
+                           "PUT_2" = te_res_list_df$PUT_2,
+                           "PFC_2" = te_res_list_df$PFC_2,
+                           "AMY_2" = te_res_list_df$AMY_2), get_significant_L1s)))
+grid.text("Astrocytes", vjust = -17, hjust= -3)
+
+# Microglia
+upset(fromList(sapply(list("SN_4" = te_res_list_df$SN_4,
+                           "PUT_4" = te_res_list_df$PUT_4,
+                           "PFC_4" = te_res_list_df$PFC_4,
+                           "AMY_4" = te_res_list_df$AMY_4), get_significant_L1s)))
+grid.text("Microglia", vjust = -17, hjust= -3)
+
+# OPCs
+upset(fromList(sapply(list("SN_3" = te_res_list_df$SN_3,
+                           "PUT_3" = te_res_list_df$PUT_3,
+                           "PFC_3" = te_res_list_df$PFC_3,
+                           "AMY_3" = te_res_list_df$AMY_3), get_significant_L1s)))
+grid.text("OPCs", vjust = -17, hjust= -3)
+
+# Oligos
+upset(fromList(sapply(list("SN_5" = te_res_list_df$SN_5,
+                           "PUT_5" = te_res_list_df$PUT_5,
+                           "PFC_5" = te_res_list_df$PFC_5,
+                           "AMY_5" = te_res_list_df$AMY_5), get_significant_L1s)))
+grid.text("Oligodendrocytes", vjust = -17, hjust= 0)
+
+# Neurons cluster 1
+upset(fromList(sapply(list("PUT_1" = te_res_list_df$PUT_1,
+                           "PFC_1" = te_res_list_df$PFC_1,
+                           "AMY_1" = te_res_list_df$AMY_1), get_significant_L1s)))
+grid.text("Neurons cluster 1", vjust = -17, hjust= -3)
+```
+
+* Separate plots for per-region comparisons: Tests yielding no differentially expressed TEs are commented out or ommited from this chunk (PFC and SN just had one cell type with DE L1s).
+```{r}
+# All in PUT
+upset(fromList(list("OPCs" = get_significant_L1s(te_res_list_df$PUT_3),
+                    # "Oligos" = get_significant_L1s(te_res_list_df$PUT_5),
+                    "Microglia" = get_significant_L1s(te_res_list_df$PUT_4),
+                    # "VLMCs" = get_significant_L1s(te_res_list_df$PUT_6),
+                    # "T cells" = get_significant_L1s(te_res_list_df$PUT_7),
+               # "Exc Neurons" = get_significant_L1s(te_res_list_df$PUT_0),
+               # "Inh Neurons" = get_significant_L1s(te_res_list_df$PUT_1),
+               "Astrocytes" = get_significant_L1s(te_res_list_df$PUT_2))), sets = c("OPCs", "Microglia", "Astrocytes"), nintersects = 100, nsets = 100, mainbar.y.max = 30) 
+grid.text("Putamen", vjust = -17, hjust= 0)
+
+
+# All in AMY
+upset(fromList(list("Exc Neurons" = get_significant_L1s(te_res_list_df$AMY_0),
+                    "Inh Neurons" = get_significant_L1s(te_res_list_df$AMY_1),
+                    "Astrocytes" = get_significant_L1s(te_res_list_df$AMY_2),
+                    # "OPCs" = get_significant_L1s(te_res_list_df$AMY_3),
+                    "Oligos" = get_significant_L1s(te_res_list_df$AMY_5)
+                    # "Microglia" = get_significant_L1s(te_res_list_df$AMY_4),
+                    # "VLMCs" = get_significant_L1s(te_res_list_df$AMY_6),
+                    # "T cells" = get_significant_L1s(te_res_list_df$AMY_7)
+                    )), sets = c("Exc Neurons", "Inh Neurons", "Astrocytes", "Oligos"), nintersects = 100, nsets = 100, mainbar.y.max = 30) 
+grid.text("Amygdala", vjust = -17, hjust= 0)
+```
+
+* One big UpSet for all results
+```{r}
+upset(fromList(list("SN: OPCs" = get_significant_L1s(te_res_list_df$SN_3),
+     "SN: Oligos" = get_significant_L1s(te_res_list_df$SN_5),
+     "SN: Microglia" = get_significant_L1s(te_res_list_df$SN_4),
+     "SN: VLMCs" = get_significant_L1s(te_res_list_df$SN_6),
+     "SN: T cells" = get_significant_L1s(te_res_list_df$SN_7),
+     "SN: Neurons cluster 0" = get_significant_L1s(te_res_list_df$SN_0),
+     "SN: Neurons cluster 1" = get_significant_L1s(te_res_list_df$SN_1),
+     "SN: Astrocytes" = get_significant_L1s(te_res_list_df$SN_2),
+     
+     "PUT: OPCs" = get_significant_L1s(te_res_list_df$PUT_3),
+     "PUT: Oligos" = get_significant_L1s(te_res_list_df$PUT_5),
+     "PUT: Microglia" = get_significant_L1s(te_res_list_df$PUT_4),
+     "PUT: VLMCs" = get_significant_L1s(te_res_list_df$PUT_6),
+     "PUT: T cells" = get_significant_L1s(te_res_list_df$PUT_7),
+     "PUT: Neurons cluster 0" = get_significant_L1s(te_res_list_df$PUT_0),
+     "PUT: Neurons cluster 1" = get_significant_L1s(te_res_list_df$PUT_1),
+     "PUT: Astrocytes" = get_significant_L1s(te_res_list_df$PUT_2),
+     
+     "PFC: OPCs" = get_significant_L1s(te_res_list_df$PFC_3),
+     "PFC: Oligos" = get_significant_L1s(te_res_list_df$PFC_5),
+     "PFC: Microglia" = get_significant_L1s(te_res_list_df$PFC_4),
+     "PFC: VLMCs" = get_significant_L1s(te_res_list_df$PFC_6),
+     "PFC: T cells" = get_significant_L1s(te_res_list_df$PFC_7),
+     "PFC: Neurons cluster 0" = get_significant_L1s(te_res_list_df$PFC_0),
+     "PFC: Neurons cluster 1" = get_significant_L1s(te_res_list_df$PFC_1),
+     "PFC: Astrocytes" = get_significant_L1s(te_res_list_df$PFC_2),
+     
+     "AMY: OPCs" = get_significant_L1s(te_res_list_df$AMY_3),
+     "AMY: Oligos" = get_significant_L1s(te_res_list_df$AMY_5),
+     "AMY: Microglia" = get_significant_L1s(te_res_list_df$AMY_4),
+     "AMY: VLMCs" = get_significant_L1s(te_res_list_df$AMY_6),
+     "AMY: T cells" = get_significant_L1s(te_res_list_df$AMY_7),
+     "AMY: Neurons cluster 0" = get_significant_L1s(te_res_list_df$AMY_0),
+     "AMY: Neurons cluster 1" = get_significant_L1s(te_res_list_df$AMY_1),
+     "AMY: Astrocytes" = get_significant_L1s(te_res_list_df$AMY_2))), nintersects = 100, nsets = 100, mainbar.y.max = 30) 
+
+```
+
