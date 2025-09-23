@@ -1,0 +1,290 @@
+---
+title: "Microglia Subcluster Gene Expression Analysis"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Overview
+
+This notebook analyzes gene expression in microglia subclusters across multiple brain regions (SN, PUT, PFC, AMY) in the ASAP-PMDBS snRNA-seq dataset. The workflow focuses on:
+  1. **Data preparation**: loading gene-level counts from trusTEr output, organizing by cluster and region.
+  2. **DEA per cluster**: identifying marker genes that characterize each microglia cluster (to better characterize them).
+  3. **PD vs Control analysis**: testing differential expression between PD and control within each cluster and region.
+  4. **Functional focus**: visualizing interferon (IFN)-related signatures across clusters.
+  5. **Visualization**: generating mean-difference plots, violin/boxplots, and UMAP overlays 
+     for selected genes (e.g., CIITA, IFNAR1, TLR4, LRRK2).
+
+### Inputs
+- trusTEr output files with gene counts per cluster/region
+- Sample metadata: ASAP_samplesheet.xlsx
+- IFN-related gene list: IFN_related_genes_GO_microglia.xlsx
+
+### Outputs
+- Cluster-level gene count matrices (CSV)
+- Differential expression results (excel files)
+- Figures showing:
+  - Cluster markers
+  - PD vs Control effects
+  - IFN enrichment across subclusters
+
+### Notes
+- Only expressed genes (row sums > 0) are tested.
+
+## Setup: Load libraries and helper functions
+Load all required libraries and custom DEA functions
+```{r}
+library(DESeq2)
+library(data.table)
+library(ggpubr)
+library(ggplot2)
+library(tidyverse)
+library(openxlsx)
+
+source("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/TE_DEA_functions.R")
+```
+
+## Preprocess gene count files
+Gather featureCount outputs, extract region and cluster IDs, merge them into cluster-specific count matrices and save them for convenience as `.csv`
+```{r}
+path <- "~/inbox/ASAP/truster_output_microglia"
+files <- list.files(path, recursive = T, full.names = T)
+files <- files[which(grepl("gene_counts/unique/", files))]
+files <- files[which(!endsWith(files, "summary"))]
+files <- data.frame(files = files)
+files$region <- sapply(str_split(files$files, "/"), `[[`, 7)
+files$cluster <- sapply(str_split(files$files, "_uniqueMap"), `[[`, 1)
+files$cluster <- sapply(str_split(files$cluster, "/"), tail, 1)
+files$cluster_num <- sapply(str_split(files$cluster, "_"), tail, 1)
+files$region_cluster <- paste(files$region, files$cluster_num, sep="_")
+files_split <- split(files, f = c(files$region_cluster))
+regions <- c("SN", "PUT", "PFC", "AMY")
+for(cluster in as.character(0:8)){
+  for(region in regions){
+    print(paste0(region, " cluster: ", cluster))
+    region_cluster <- paste(region, cluster, sep="_")
+    files_region_cluster <- files_split[[region_cluster]]
+    for(f in 1:length(files_region_cluster$files)){
+      file <- files_region_cluster$files[f]
+      if(f == 1 & region == regions[1] & cluster == "0"){
+        gene_counts <- fread(file, data.table = F)
+        colnames(gene_counts)[ncol(gene_counts)] <- str_remove_all(sapply(str_split(colnames(gene_counts)[ncol(gene_counts)], "/"), tail, 1), "_Aligned.sortedByCoord.out.bam")
+      }else{
+        tmp <- fread(file, data.table = F)
+        colnames(tmp)[ncol(tmp)] <- str_remove_all(sapply(str_split(colnames(tmp)[ncol(tmp)], "/"), tail, 1), "_Aligned.sortedByCoord.out.bam")
+        if(all(tmp$Geneid == gene_counts$Geneid)){
+          gene_counts <- cbind(gene_counts, tmp[,ncol(tmp),drop=F])
+        }else{
+          gene_counts <- merge(gene_counts, tmp[,c("Geneid", colnames(tmp)[ncol(tmp)])], by="Geneid")
+        }
+      }
+    }
+    write.csv(gene_counts, paste("~/inbox/ASAP/truster_output_microglia/", region, "/gene_counts_", paste(region, cluster, sep="_"), ".csv", sep=""), row.names = F)
+  }
+}
+
+length(colnames(gene_counts))
+```
+
+## Characterize clusters
+Characterize cluster identity within each microglia subcluster. Run DEA comparing each subcluster to "other" subclusters and save results.
+```{r}
+gene_cluster_dds_list <- list()
+gene_cluster_exp_list <- list()
+gene_cluster_res_list <- list()
+gene_cluster_res_list_df <- list()
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+samplesheet <- samplesheet[!is.na(samplesheet$Sample),]
+
+for(region in regions){
+  gene_cluster_dds_list[[cluster]] <- list()
+  gene_cluster_exp_list[[cluster]] <- list()
+  gene_cluster_res_list[[cluster]] <- list()
+  gene_cluster_res_list_df[[cluster]] <- list()
+  gene_counts <- list()
+  for(cluster in as.character(0:8)){
+    print(cluster)
+    print(region)
+    if(cluster == "0"){
+      gene_counts[[region]] <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+      samplesheet_clusters <- samplesheet
+      samplesheet_clusters$cluster <- cluster
+      samplesheet_clusters$samples_cluster <- paste(samplesheet_clusters$Sample, cluster, sep="_")
+    }else{
+      tmp <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+      if(all(tmp$Geneid == gene_counts[[region]]$Geneid)){
+        gene_counts[[region]] <- cbind(gene_counts[[region]], tmp[,c(7:ncol(tmp))])
+      }else{
+        gene_counts[[region]] <- merge(gene_counts[[region]], tmp[,c(1, 7:ncol(tmp))], by="Geneid")
+      }
+      samplesheet_tmp <- samplesheet
+      samplesheet_tmp$samples_cluster <- paste(samplesheet_tmp$Sample, cluster, sep="_")
+      samplesheet_tmp$cluster <- cluster
+      samplesheet_clusters <- rbind(samplesheet_clusters, samplesheet_tmp)
+    }
+  }
+  rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
+  samplesheet_clusters <- samplesheet_clusters[which(samplesheet_clusters$samples_cluster %in% colnames(gene_counts[[region]])),]
+  expressed_genes <- rownames(gene_counts[[region]])[which(rowSums(gene_counts[[region]][,samplesheet_clusters$samples_cluster]) > 0)]
+  rownames(samplesheet_clusters) <- samplesheet_clusters$samples_cluster
+  
+  for(cluster in as.character(0:8)){
+    samplesheet_clusters$condition <- ifelse(samplesheet_clusters$cluster == cluster, cluster, "other")
+    gene_cluster_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((gene_counts[[region]][expressed_genes,samplesheet_clusters$samples_cluster]+1), samplesheet_clusters[samplesheet_clusters$samples_cluster,], design =  ~ condition)
+      gene_cluster_dds_list[[cluster]][[region]]$condition <- relevel(gene_cluster_dds_list[[cluster]][[region]]$condition, "other")
+      gene_cluster_dds_list[[cluster]][[region]] <- DESeq(gene_cluster_dds_list[[cluster]][[region]])
+      gene_cluster_res_list[[cluster]][[region]] <- results(gene_cluster_dds_list[[cluster]][[region]], )
+      gene_cluster_res_list_df[[cluster]][[region]] <- as.data.frame(gene_cluster_res_list[[cluster]][[region]])
+      gene_cluster_res_list_df[[cluster]][[region]]$gene_id <- rownames(gene_cluster_res_list_df[[cluster]][[region]])
+      print(names(gene_cluster_res_list_df[[cluster]]))
+    }
+    openxlsx::write.xlsx(gene_cluster_res_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_microglia_subcluster_", cluster, "_cluster_DEA_snRNAseq_res.xlsx", sep=""))
+  }
+
+
+```
+
+## Characterize PD effect per subcluster
+Differential expression analyses for PD vs Control pseudobulks for each region and subcluster pair. Save per-subcluster results (one excel with region per sheet).
+```{r}
+library(openxlsx)
+
+gene_dds_list <- list()
+gene_exp_list <- list()
+gene_res_list <- list()
+gene_res_list_df <- list()
+
+for(cluster in as.character(0:8)){
+  gene_dds_list[[cluster]] <- list()
+  gene_exp_list[[cluster]] <- list()
+  gene_res_list[[cluster]] <- list()
+  gene_res_list_df[[cluster]] <- list()
+  for(region in regions){
+    print(cluster)
+    print(region)
+    gene_counts <- list()
+    gene_counts[[region]] <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+    rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
+
+    samplesheet_list <- split(samplesheet, f = samplesheet$Region)
+
+    rownames(samplesheet_list[[region]]) <- samplesheet_list[[region]]$Sample
+    samples_cluster <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+    samples_cluster <- samples_cluster[which(samples_cluster %in% colnames(gene_counts[[region]]))]
+    rownames(samplesheet_list[[region]]) <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+    rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
+    
+    expressed_genes <- rownames(gene_counts[[region]])[which(rowSums(gene_counts[[region]][,samples_cluster]) > 0)]
+    gene_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((gene_counts[[region]][expressed_genes,samples_cluster]+1), samplesheet_list[[region]][samples_cluster,], design =  ~ Dx)
+    gene_dds_list[[cluster]][[region]]$Dx <- relevel(gene_dds_list[[cluster]][[region]]$Dx, "Ctl")
+    gene_dds_list[[cluster]][[region]] <- DESeq(gene_dds_list[[cluster]][[region]])
+    gene_exp_list[[cluster]][[region]] <- getAverage(gene_dds_list[[cluster]][[region]])
+    gene_res_list[[cluster]][[region]] <- results(gene_dds_list[[cluster]][[region]], )
+    gene_res_list_df[[cluster]][[region]] <- as.data.frame(gene_res_list[[cluster]][[region]])
+    gene_res_list_df[[cluster]][[region]]$gene_id <- rownames(gene_res_list_df[[cluster]][[region]])
+    print(names(gene_res_list_df[[cluster]]))
+  }
+  openxlsx::write.xlsx(gene_res_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_microglia_subcluster_", cluster, "_PD_DEA_snRNAseq_res.xlsx", sep=""))
+}
+
+
+```
+
+
+## Mean plots of PD vs Control
+Visualize mean expression vs log2FC for each subcluster-region
+```{r}
+mean_plots_list <- list()
+
+for(cluster in as.character(0:8)){
+  mean_plots_list[[cluster]] <- list()
+  for(region in regions){ 
+    effect <- unique(samplesheet_list[[region]][which(samplesheet_list[[region]]$Dx != "Ctl"),"Dx"])
+    colors_list <- pick_colors_meanplot(gene_res_list[[cluster]][[region]])
+    mean_plots_list[[cluster]][[region]] <- meanPlot_cus(exp = gene_exp_list[[cluster]][[region]]$Mean,
+                                         test = gene_res_list[[cluster]][[region]], 
+                                         c1 = effect, c2="Ctl", 
+                                         col1=colors_list$col1, col2=colors_list$col2, col3=colors_list$col3,
+                                         p = 0.05, l=1, ttl = paste0(region, "_", cluster), repel = F)
+  }
+}
+
+mean_plots_list
+```
+
+## Focus on interferon response genes
+
+Since these were the terms we saw up in microglia, let's see if any subcluster in particular over-expresses these genes. Visualize across regions and clusters. 
+```{r}
+ifn_microglia_genes <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/gene_analysis/IFN_related_genes_GO_microglia.xlsx")$gene_id
+
+ifn_microglia_genes_res <- data.frame()
+for(cluster in as.character(0:8)){
+  for(region in regions){
+    tmp <- gene_res_list_df[[cluster]][[region]][ifn_microglia_genes, ]    
+    tmp$type <- paste(region, cluster, sep="_")
+    ifn_microglia_genes_res <- rbind(ifn_microglia_genes_res, tmp[,c("gene_id", "log2FoldChange", "type")])
+  }
+}
+
+ifn_microglia_genes_res$cluster <- sapply(str_split(ifn_microglia_genes_res$type, "_"), `[[`, 2)
+ifn_microglia_genes_res$region <- sapply(str_split(ifn_microglia_genes_res$type, "_"), `[[`, 1)
+ifn_microglia_genes_res$region <- factor(ifn_microglia_genes_res$region, levels=c("SN", "PUT", "PFC", "AMY"))
+
+cluster_colors = c("0" = "#8ed1c6",
+                   "1" = "#eec819",
+                   "2" = "#bebada",
+                   "3" = "#f48073",
+                   "4" = "#80b2d3",
+                   "5" = "#fbb363",
+                   "6" = "#b4d66c",
+                   "7" = "#f9cde1",
+                   "8" = "#d9d9d8")
+
+ifn_microglia_genes_res %>% 
+  filter(region == "SN") %>% 
+ggplot(aes(x=cluster, y=log2FoldChange, fill=cluster)) + geom_jitter(color="lightgrey", width = 0.2, size=0.3, color="lightgrey") + geom_violin(alpha=0.5) + geom_boxplot(width = 0.2, outliers = F) + 
+  theme_bw() + geom_hline(yintercept = 0, linetype="dashed") + scale_fill_manual(values= cluster_colors) + ggtitle("IFN core enrichment genes: SN Microglia")
+
+ifn_microglia_genes_res %>% 
+  filter(region == "PUT") %>% 
+ggplot(aes(x=cluster, y=log2FoldChange, fill=cluster)) + geom_jitter(color="lightgrey", width = 0.2, size=0.3, color="lightgrey") + geom_violin(alpha=0.5) + geom_boxplot(width = 0.2, outliers = F) + 
+  theme_bw() + geom_hline(yintercept = 0, linetype="dashed") + scale_fill_manual(values= cluster_colors) + ggtitle("IFN core enrichment genes: PUT Microglia")
+
+ifn_microglia_genes_res %>% 
+  filter(region == "PFC") %>% 
+ggplot(aes(x=cluster, y=log2FoldChange, fill=cluster)) + geom_jitter(color="lightgrey", width = 0.2, size=0.3, color="lightgrey") + geom_violin(alpha=0.5) + geom_boxplot(width = 0.2, outliers = F) + 
+  theme_bw() + geom_hline(yintercept = 0, linetype="dashed") + scale_fill_manual(values= cluster_colors) + ggtitle("IFN core enrichment genes: PFC Microglia")
+
+ifn_microglia_genes_res %>% 
+  filter(region == "AMY") %>% 
+ggplot(aes(x=cluster, y=log2FoldChange, fill=cluster)) + geom_jitter(color="lightgrey", width = 0.2, size=0.3, color="lightgrey") + geom_violin(alpha=0.5) + geom_boxplot(width = 0.2, outliers = F) + 
+  theme_bw() + geom_hline(yintercept = 0, linetype="dashed") + scale_fill_manual(values= cluster_colors) + ggtitle("IFN core enrichment genes: AMY Microglia")
+
+```
+
+## Visualize marker gene expression on UMAP
+Overlay expression of key immune-related genes as examples. 
+```{r}
+microglia_gene_counts <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_microglia/microglia_subcluster_genes_counts.csv", data.table=F)
+microglia_gene_counts <- microglia_gene_counts[,c("V1", "CIITA", "IFNAR1", "TLR4", "LRRK2")]
+microglia_umap <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_microglia/microglia_subcluster_clustering_umap_barcodes.csv", data.table=F)
+microglia_leiden <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_microglia/microglia_subcluster_clustering_leiden_barcodes.csv", data.table=F)
+microglia_gene_counts <- merge(merge(microglia_gene_counts, microglia_leiden, by="V1"), microglia_umap, by="V1")
+
+microglia_gene_counts %>% 
+  arrange(TLR4) %>% 
+ggplot(aes(x=V2, y=V3, color=TLR4)) + 
+  geom_point(size=0.3) + facet_wrap(region~dx, ncol=2) + theme_bw() + 
+  scale_color_distiller(palette = "Reds", direction = 1)
+
+microglia_gene_counts %>% 
+  arrange(IFNAR1) %>% 
+ggplot(aes(x=V2, y=V3, color=IFNAR1)) + 
+  geom_point(size=0.3) + facet_wrap(region~dx, ncol=2) + theme_bw() + 
+  scale_color_distiller(palette = "Reds", direction = 1)
+
+```
+
+
