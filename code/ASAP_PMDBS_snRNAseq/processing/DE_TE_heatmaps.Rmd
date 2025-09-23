@@ -1,0 +1,292 @@
+---
+title: "Heatmaps of upregulated TEs in PD"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Setup
+
+Load preprocessed TE counts, along with helper functions for heatmap plotting.  
+
+```{r}
+library(DESeq2)
+library(data.table)
+library(ggplot2)
+library(tidyverse)
+library(openxlsx)
+library(RColorBrewer)
+library(pheatmap)
+
+# Load preprocessed data
+load("preprocessed_TE_data.RData")
+
+# Load functions
+source("TE_heatmap_functions.R")
+# Now you can run DE-specific heatmaps without re-reading all the raw matrices
+annotation_cols <- list("Region" = c("SN" = "#46c8e8",
+                                     "PUT" = "#ed9924",
+                                     "PFC" = "#db84da",
+                                     "AMY" = "#7ac47c"),
+                        "celltype_simple" = c("Neurons" = "#a0dbb0",
+                                              "Glia" = "#a1a8e6",
+                                              "Microglia" = "#e0e0e0"),
+                        "celltype" = c("0_ExcNeurons" = "#80e8d8",
+                                       "1_InhNeurons" = "#f5be51",
+                                       "2_Astrocytes" = "#c69deb",
+                                       "3_OPC" = "#f55d42",
+                                       "4_Microglia" = "#688db3",
+                                       "5_Oligodendrocytes" = "#ed8337",
+                                       "6_VLMC" = "#7bbd75",
+                                       "7_Tcells" = "#eb7878"),
+                        "Dx" = c("PD" = "#8fd9ca",
+                                 "Ctl" = "lightgrey"),
+                        "type" = c("only" = "#a0dbb0",
+                                   "put" = "#388db3"))
+```
+
+## HERVs in Microglia (SN and PUT)
+
+Load HERV differential expression results for SN and PUT microglia, identify common and unique upregulated HERVs, and generate annotated heatmaps. 
+
+```{r}
+# Load HERV DE results
+herv_de_sn_microglia <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/TEanalysis/upreg_HERVs_microglia_SN.tab")
+herv_de_put_microglia <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/TEanalysis/upreg_HERVs_microglia_PUT.tab")
+herv_res <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/HERVs_cluster_4_DEA_snRNAseq.xlsx")
+
+# Identify common and unique upregulated HERVs
+# All SN|PUT HERVs
+upreg_hervs_sn_put <- unique(c(herv_de_sn_microglia$Geneid, herv_de_put_microglia$Geneid))
+upreg_herv_sn_put_res <- herv_res[which(herv_res$TE_id %in% upreg_hervs_sn_put),]
+upreg_herv_sn_put_res <- upreg_herv_sn_put_res[order(upreg_herv_sn_put_res$log2FoldChange, decreasing = T),]
+
+# SN only
+herv_de_sn_microglia_only <- herv_de_sn_microglia[which(!herv_de_sn_microglia$Geneid %in% herv_de_put_microglia$Geneid),] # 19
+herv_de_sn_microglia$type <- ifelse(herv_de_sn_microglia$Geneid %in% herv_de_sn_microglia_only$Geneid, "only", "put")
+# Both in SN and PUT
+herv_de_sn_microglia_put <- herv_de_sn_microglia[which(herv_de_sn_microglia$Geneid %in% herv_de_put_microglia$Geneid),] # 8
+# PUT only
+herv_de_put_microglia_only <- herv_de_put_microglia[which(!herv_de_put_microglia$Geneid %in% herv_de_sn_microglia$Geneid),] # 16
+
+# Annotation
+data_TE_annotation <- data.frame("TE_id" = upreg_hervs_sn_put,
+                                 "type" = ifelse(startsWith(upreg_hervs_sn_put, "HERV"), "HERV", "L1"))
+rownames(data_TE_annotation) <- data_TE_annotation$TE_id
+rownames(upreg_herv_sn_put_res) <- upreg_herv_sn_put_res$TE_id
+HERV_data$samplesheet$group <- paste(HERV_data$samplesheet$Region, HERV_data$samplesheet$Dx)
+```
+
+### Generate heatmaps for SN-only, SN + PUT, and PUT-only HERVs
+```{r}
+# SN + PUT
+tmp_res <- upreg_herv_sn_put_res[herv_de_sn_microglia$Geneid,]
+tmp_res$type <- ifelse(tmp_res$TE_id %in% herv_de_sn_microglia_only$Geneid, "only", "put")
+tmp_res <- tmp_res[order(tmp_res$type, tmp_res$log2FoldChange, decreasing = T),]
+
+heatmap_sn_microglia <- asap_heatmap_snRNA(region = c("SN", "PUT", "PFC", "AMY"), 
+                   tes = tmp_res[herv_de_sn_microglia$Geneid,"TE_id"], 
+                   scale = "row", 
+                   celltype="4", 
+                   show_rownames = T, 
+                   prefix="HERV", 
+                   data_TE_annotation = tmp_res[,c("type"),drop=F], 
+                   group_cols = c("group"),
+                   order_cols_groups = c("SN Ctl","SN PD", "PUT Ctl", 
+                                         "PUT PD", "PFC Ctl","PFC PD", 
+                                         "AMY Ctl", "AMY PD"),
+                   data= HERV_data, 
+                   palette = "RdBu",
+                   breaks = seq(-3, 3, length.out= 56),
+                   group_rows = "HERV", 
+                   index_row_reorder = tmp_res[which(tmp_res$TE_id %in% herv_de_sn_microglia$Geneid),"TE_id"])
+
+# PUT only
+tmp_res <- upreg_herv_sn_put_res[herv_de_put_microglia_only$Geneid,]
+tmp_res <- tmp_res[order(tmp_res$log2FoldChange, decreasing = T),]
+tmp_res[which(tmp_res$TE_id %in% herv_de_put_microglia_only$Geneid),"type"] <- "PUT"
+
+heatmap_put_microglia <- asap_heatmap_snRNA(region = c("SN", "PUT", "PFC", "AMY"), 
+                   tes = tmp_res[herv_de_put_microglia_only$Geneid,"TE_id"], 
+                   scale = "row", 
+                   celltype="4", 
+                   show_rownames = T, 
+                   prefix="HERV", 
+                   data_TE_annotation = tmp_res[which(tmp_res$TE_id %in% herv_de_put_microglia_only$Geneid),"type",drop=F], 
+                   group_cols = c("group"),
+                   order_cols_groups = c("SN Ctl","SN PD", "PUT Ctl", 
+                                         "PUT PD", "PFC Ctl","PFC PD", 
+                                         "AMY Ctl", "AMY PD"),
+                   data= HERV_data, 
+                   palette = "RdBu",
+                   breaks = seq(-4, 4, length.out= 56),
+                   group_rows = "HERV", 
+                   index_row_reorder = tmp_res[which(tmp_res$TE_id %in% herv_de_put_microglia_only$Geneid),"TE_id"])
+```
+
+### Save matrices
+```{r}
+# SN + PUT
+tmp_res <- upreg_herv_sn_put_res[herv_de_sn_microglia$Geneid,]
+tmp_res$type <- ifelse(tmp_res$TE_id %in% herv_de_sn_microglia_only$Geneid, "only", "put")
+tmp_res <- tmp_res[order(tmp_res$type, tmp_res$log2FoldChange, decreasing = T),]
+
+heatmap_sn_put_microglia <- asap_heatmap_snRNA(region = c("SN", "PUT", "PFC", "AMY"), 
+                   tes = tmp_res[herv_de_sn_microglia$Geneid,"TE_id"], 
+                   scale = "row", 
+                   celltype="4", 
+                   show_rownames = T, 
+                   return_df = T,
+                   prefix="HERV", 
+                   data_TE_annotation = tmp_res[,c("type"),drop=F], 
+                   group_cols = c("group"),
+                   order_cols_groups = c("SN Ctl","SN PD", "PUT Ctl", 
+                                         "PUT PD", "PFC Ctl","PFC PD", 
+                                         "AMY Ctl", "AMY PD"),
+                   data= HERV_data, 
+                   palette = "RdBu",
+                   breaks = seq(-4, 4, length.out= 56),
+                   group_rows = "HERV", 
+                   index_row_reorder = tmp_res[which(tmp_res$TE_id %in% herv_de_sn_microglia$Geneid),"TE_id"])
+
+# PUT only
+tmp_res <- upreg_herv_sn_put_res[herv_de_put_microglia_only$Geneid,]
+tmp_res <- tmp_res[order(tmp_res$log2FoldChange, decreasing = T),]
+tmp_res[which(tmp_res$TE_id %in% herv_de_put_microglia_only$Geneid),"type"] <- "PUT"
+
+heatmap_put_microglia <- asap_heatmap_snRNA(region = c("SN", "PUT", "PFC", "AMY"), 
+                   tes = tmp_res[herv_de_put_microglia_only$Geneid,"TE_id"], 
+                   scale = "row", 
+                   celltype="4", 
+                   show_rownames = T, 
+                   return_df = T,
+                   prefix="HERV", 
+                   data_TE_annotation = tmp_res[which(tmp_res$TE_id %in% herv_de_put_microglia_only$Geneid),"type",drop=F], 
+                   group_cols = c("group"),
+                   order_cols_groups = c("SN Ctl","SN PD", "PUT Ctl", 
+                                         "PUT PD", "PFC Ctl","PFC PD", 
+                                         "AMY Ctl", "AMY PD"),
+                   data= HERV_data, 
+                   group_rows = "HERV", 
+                   palette = "RdBu",
+                   index_row_reorder = tmp_res[which(tmp_res$TE_id %in% herv_de_put_microglia_only$Geneid),"TE_id"])
+
+# Write to tab
+write.table(heatmap_put_microglia$norm_counts, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_PUT_only_FL_HERVs_upregulated_microglia.tab", sep = ",", quote = F, col.names = T, row.names = F)
+write.table(heatmap_sn_put_microglia$norm_counts, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_SN_PUT_FL_HERVs_upregulated_microglia.tab", sep = ",", quote = F, col.names = T, row.names = F)
+```
+
+## HERVs in medium spiny neurons (cluster 1)
+
+Examine HERV upregulation in MSN from PUT (cluster 1; here referred to as IN) and visualize in heatmaps.
+
+```{r}
+# Load results
+herv_de_put_IN <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/TEanalysis/upreg_HERVs_IN_PUT.tab")
+herv_res <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/HERVs_cluster_1_DEA_snRNAseq.xlsx", sheet="PUT")
+
+upreg_herv_put_IN_res <- herv_res[which(herv_res$TE_id %in% herv_de_put_IN$Geneid),]
+upreg_herv_put_IN_res <- upreg_herv_put_IN_res[order(upreg_herv_put_IN_res$log2FoldChange, decreasing = T),]
+
+# Annotation
+data_TE_annotation <- data.frame("TE_id" = upreg_herv_put_IN_res$TE_id,
+                                 "type" = ifelse(startsWith(upreg_herv_put_IN_res$TE_id, "HERV"), "HERV", "L1"))
+rownames(data_TE_annotation) <- data_TE_annotation$TE_id
+rownames(upreg_herv_put_IN_res) <- upreg_herv_put_IN_res$TE_id
+
+tmp_res <- upreg_herv_put_IN_res[herv_de_put_IN$Geneid,]
+tmp_res <- tmp_res[order(tmp_res$log2FoldChange, decreasing = T),]
+
+asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = tmp_res[herv_de_put_IN$Geneid,"TE_id"], 
+                   scale = "row", 
+                   celltype="1", 
+                   show_rownames = T, 
+                   prefix = "HERV", 
+                   data_TE_annotation = data.frame("type" =rep("HERV", nrow(herv_de_put_IN))), 
+                   group_cols = c("group"),
+                   order_cols_groups = c("PUT Ctl", "PUT PD"),
+                   data= HERV_data, 
+                   group_rows = "HERV", 
+                   palette = "RdBu",
+                   annotation_cols = annotation_cols,
+                   index_row_reorder = tmp_res[which(tmp_res$TE_id %in% herv_de_put_IN$Geneid),"TE_id"])
+
+heatmap_put_IN <- asap_heatmap_snRNA(region = c("PUT"), 
+                   tes = tmp_res[herv_de_put_IN$Geneid,"TE_id"], 
+                   scale = "row", 
+                   celltype="1", 
+                   return_df = T,
+                   show_rownames = T, 
+                   prefix="HERV", 
+                   data_TE_annotation = data.frame("type" =rep("HERV", nrow(herv_de_put_IN))), 
+                   group_cols = c("group"),
+                   order_cols_groups = c("PUT Ctl", "PUT PD"),
+                   data= HERV_data, 
+                   group_rows = "HERV", 
+                   palette = "RdBu",
+                   index_row_reorder = tmp_res[which(tmp_res$TE_id %in% herv_de_put_IN$Geneid),"TE_id"])
+
+write.table(heatmap_put_IN$norm_counts, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_PUT_FL_HERVs_upregulated_IN.tab", sep = ",", quote = F, col.names = T, row.names = F)
+```
+
+## L1s in Microglia (SN and PUT)
+
+Load L1 differential expression results for SN and PUT microglia, identify common and unique upregulated L1s, and generate annotated heatmaps. 
+```{r}
+L1s_sorted_pfc <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PFC.tab")$V1
+L1s_sorted_put <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PUT.tab")$V1
+L1s_sorted_sn <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_SN.tab")$V1
+L1s_sorted_amy <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_AMY.tab")$V1
+
+l1_res_sn <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/l1_cluster_4_DEA_snRNAseq.xlsx", sheet = "SN")
+l1_res_put <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/l1_cluster_4_DEA_snRNAseq.xlsx", sheet = "PUT")
+l1_res_sn$region <- "SN"
+l1_res_put$region <- "PUT"
+l1_res <- rbind(l1_res_sn, l1_res_put)
+
+l1_de_sn_microglia <- l1_res_sn[which(l1_res_sn$log2FoldChange > 1 & l1_res_sn$padj < 0.05), "l1_id"]
+l1_de_put_microglia <- l1_res_put[which(l1_res_put$log2FoldChange > 1 & l1_res_put$padj < 0.05), "l1_id"]
+
+upreg_l1s_sn_put <- unique(c(l1_de_sn_microglia, l1_de_put_microglia))
+upreg_l1_sn_put_res <- l1_res[which(l1_res$l1_id %in% upreg_l1s_sn_put),]
+upreg_l1_sn_put_res <- upreg_l1_sn_put_res[order(upreg_l1_sn_put_res$log2FoldChange, decreasing = T),]
+
+data_TE_annotation <- data.frame("TE_id" = upreg_l1s_sn_put,
+                                 "type" = sapply(str_split(upreg_l1s_sn_put, "_dup"), head, 1))
+rownames(data_TE_annotation) <- data_TE_annotation$TE_id
+TE_data$samplesheet$group <- paste(TE_data$samplesheet$Region, TE_data$samplesheet$Dx)
+
+# SN only
+l1_de_sn_microglia_only <- l1_de_sn_microglia[which(!l1_de_sn_microglia %in% l1_de_put_microglia)]
+# Both in SN and PUT
+l1_de_sn_microglia_put <- l1_de_sn_microglia[which(l1_de_sn_microglia %in% l1_de_put_microglia)]
+# PUT only
+l1_de_put_microglia_only <- l1_de_put_microglia[which(!l1_de_put_microglia %in% l1_de_sn_microglia)]
+
+asap_heatmap_snRNA(region = c("SN", "PUT", "PFC", "AMY"), 
+                   tes = upreg_l1s_sn_put,
+                   scale = "row", 
+                   celltype="4", 
+                   show_rownames = T,
+                   data_TE_annotation = data_TE_annotation[,c("type"),drop=F], 
+                   group_cols = c("group"),
+                   palette = "RdBu",
+                   order_cols_groups = c("SN Ctl","SN PD", "PUT Ctl", "PUT PD", "PFC Ctl","PFC PD", "AMY Ctl", "AMY PD"),
+                   data= TE_data) 
+
+heatmap_sn_microglia <- asap_heatmap_snRNA(region = c("SN", "PUT", "PFC", "AMY"), 
+                   tes = upreg_l1s_sn_put,
+                   scale = "row", 
+                   celltype="4", 
+                   show_rownames = T,
+                   return_df = T,
+                   data_TE_annotation = data_TE_annotation[,c("type"),drop=F], 
+                   group_cols = c("group"),
+                   palette = "RdBu",
+                   order_cols_groups = c("SN Ctl","SN PD", "PUT Ctl", "PUT PD", "PFC Ctl","PFC PD", "AMY Ctl", "AMY PD"),
+                   data= TE_data) 
+
+write.table(heatmap_sn_microglia$norm_counts, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_SN_PUT_FL_L1s_upregulated_microglia.tab", sep = ",", quote = F, col.names = T, row.names = F)
+```
