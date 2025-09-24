@@ -1,0 +1,172 @@
+---
+title: "Upregulated HERV visualization"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Overview
+
+This document explores the upregulation of HERVs in different brain regions, focusing on microglial cells. 
+
+We identify significantly upregulated HERVs and analyze their genomic features, putative protein content, presence of LTR elements, and evolutionary age. Visualizations include UpSet plots, histograms, and heatmaps.
+
+## Set up
+
+Load necessary packages and datasets, define helper functions, and process genomic annotations related to HERVs (retrotector).
+
+```{r}
+library(DESeq2)
+library(UpSetR)
+library(data.table)
+library(pheatmap)
+library(ggplot2)
+library(tidyverse)
+library(openxlsx)
+
+get_significant_HERVs <- function(df){
+  det <- df[which(df$padj < 0.05 & df$log2FoldChange > 1), "HERV_id"]
+  if (length(det) > 0){
+    return(det)  
+  }else{
+    return(NA)
+  }
+}
+
+hg38_bed <- fread("/Volumes/MyPassport/annotations/human/retrotector/hg38_HERVs_prediction_format.bed", data.table = F, fill = T, skip=1)
+colnames(hg38_bed) <- c("chr", "start", "end", "HERV_id", "dot", "strand")
+rownames(hg38_bed) <- hg38_bed$HERV_id
+
+hg38_ERVs <- fread("/Volumes/MyPassport/annotations/human/retrotector/hg38.ERVs.Info.txt", data.table = F, fill = T)
+hg38_ERVs$alt_start <- ifelse(hg38_ERVs$end < hg38_ERVs$start, hg38_ERVs$end, hg38_ERVs$start)
+hg38_ERVs$alt_end <- ifelse(hg38_ERVs$start == hg38_ERVs$alt_start, hg38_ERVs$end, hg38_ERVs$start)
+hg38_ERVs$coords <- paste(hg38_ERVs$Chr, hg38_ERVs$start, hg38_ERVs$end, sep="_")
+hg38_ERVs_nodups <- hg38_ERVs[which(!duplicated(hg38_ERVs$coords)),]
+
+# putative proteins
+hg38_ERVs_proteins <- fread("/Volumes/MyPassport/annotations/human/retrotector/ERVandPuteinPos_hg38rt102v150418.txt", data.table = F)
+hg38_ERVs_proteins$coords <- paste(hg38_ERVs_proteins$Chr, hg38_ERVs_proteins$Start, hg38_ERVs_proteins$End, sep = "_")
+hg38_ERVs_proteins_per_coord <- as.data.frame.matrix(table(hg38_ERVs_proteins$coords, hg38_ERVs_proteins$Putein))
+
+hg38_ERVs_nodups <- merge(hg38_ERVs_nodups, hg38_ERVs_proteins_per_coord, by.y="row.names", by.x="coords", all.x=T)
+hg38_ERVs_nodups$Env <- hg38_ERVs_nodups$Env + hg38_ERVs_nodups$ENV # Is this assumption right?
+hg38_ERVs_nodups$Env <- ifelse(hg38_ERVs_nodups$Env  >= 1, 1, 0)
+hg38_ERVs_nodups$Gag <- ifelse(hg38_ERVs_nodups$Gag  >= 1, 1, 0)
+hg38_ERVs_nodups$Pro <- ifelse(hg38_ERVs_nodups$Pro  >= 1, 1, 0)
+hg38_ERVs_nodups$Pol <- ifelse(hg38_ERVs_nodups$Pol  >= 1, 1, 0)
+hg38_ERVs_nodups$`NULL` <- ifelse(hg38_ERVs_nodups$`NULL` >= 1, 1, 0)
+
+```
+
+## Load result tables
+
+As per DESeq2 (script `PD_ASAP_Garza2025/code/ASAP_PMDBS_snRNAseq/processing/HERV_expression_PDvsCtl.Rmd`)
+```{r}
+regions <- c("SN", "PUT", "PFC", "AMY")
+clusters <- as.character(0:7)
+regions_clusters <- paste0(rep(regions, each = 8), "_", clusters)
+te_res_list_df <- list()
+for (i in regions_clusters){
+  te_res_list_df[[i]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/HERV_PDvsCtl_res.xlsx", sheet = i)  
+}
+
+```
+
+## Genomic and evolutionary features of upregulated HERVs
+
+### Putative proteins
+
+Merge significantly upregulated HERVs in microglia (clusters 4) from SN and PUT regions with annotation and visualize their protein-coding potential.
+```{r}
+upreg_HERVs_microglia_SN_PUT <- unique(c(get_significant_HERVs(te_res_list_df$SN_4), get_significant_HERVs(te_res_list_df$PUT_4)))
+upreg_HERVs_microglia_SN_PUT <- merge(hg38_bed[upreg_HERVs_microglia_SN_PUT, c("chr", "start", "end", "HERV_id")], hg38_ERVs_nodups, by.x=c("chr", "start", "end"), by.y=c("Chr", "alt_start", "alt_end"), all.x=T)
+rownames(upreg_HERVs_microglia_SN_PUT) <- upreg_HERVs_microglia_SN_PUT$HERV_id
+
+upreg_HERVs_microglia_SN_PUT_putative_proteins <- upreg_HERVs_microglia_SN_PUT[,c("coords", "Env", "Gag", "Pro", "Pol")]
+rownames(upreg_HERVs_microglia_SN_PUT_putative_proteins) <- upreg_HERVs_microglia_SN_PUT_putative_proteins$coords
+upreg_HERVs_microglia_SN_PUT_putative_proteins <- upreg_HERVs_microglia_SN_PUT_putative_proteins[,-1]
+upreg_HERVs_microglia_SN_PUT_putative_proteins$No <- ifelse((upreg_HERVs_microglia_SN_PUT_putative_proteins$Env + upreg_HERVs_microglia_SN_PUT_putative_proteins$Gag + upreg_HERVs_microglia_SN_PUT_putative_proteins$Pro + upreg_HERVs_microglia_SN_PUT_putative_proteins$Pol) == 0, 1, 0)
+
+# Upregulated HERVs in Microglia
+upset(upreg_HERVs_microglia_SN_PUT_putative_proteins, keep.order = T, sets = c("No", "Pol", "Pro", "Gag", "Env"), nsets = 100, nintersects = 100)
+```
+
+### LTR presence
+```{r}
+upreg_HERVs_microglia_SN_PUT$LTRs_present <- ifelse(startsWith(upreg_HERVs_microglia_SN_PUT$subgenes, "5LTR") & endsWith(upreg_HERVs_microglia_SN_PUT$subgenes, "3LTR"), "Both LTRs", # If it starts and ends with the expected LTRs, it has both. If not
+                                                ifelse(startsWith(upreg_HERVs_microglia_SN_PUT$subgenes, "5LTR") | endsWith(upreg_HERVs_microglia_SN_PUT$subgenes, "3LTR"), # And if it has one or the other, check if it's the 5' LTR. If not, it doesnt have any.
+                                                       ifelse(startsWith(upreg_HERVs_microglia_SN_PUT$subgenes, "5LTR"), "5' LTR present", "3' LTR present"), "No LTRs")) # If it does have the 5' LTR, it only has the 5' LTR, if not only the 3' LTR.
+
+upreg_HERVs_microglia_SN_PUT_LTRs_present <- as.data.frame(table(upreg_HERVs_microglia_SN_PUT$LTRs_present))
+colnames(upreg_HERVs_microglia_SN_PUT_LTRs_present) <- c("variable", "Frequency")
+upreg_HERVs_microglia_SN_PUT_LTRs_present$variable <- factor(upreg_HERVs_microglia_SN_PUT_LTRs_present$variable, levels = c("Both LTRs", "5' LTR present", "3' LTR present", "No LTRs"))
+
+ggplot(upreg_HERVs_microglia_SN_PUT_LTRs_present, aes(x=variable, y=Frequency)) + geom_bar(stat="identity", position="dodge") + theme_classic() + labs(fill="", x="Upregulated HERVs")
+```
+
+### HERV length distribution
+```{r}
+upreg_HERVs_microglia_SN_PUT %>%
+  mutate(length = end - start) %>%
+  ggplot(aes(x=length)) + geom_histogram() + theme_bw() + labs(x="Length (bp)", y="Frequency") + ggtitle("Length of upregulated HERVs in Microglia", subtitle = "log2FC > 1 & padj < 0.05 ")
+```
+
+### LTR divergence and estimated evolutionary age 
+
+Assuming natural drift of 0.2% divergence per myo
+```{r}
+upreg_HERVs_microglia_SN_PUT$`LTRdiv(%)` <- ifelse(upreg_HERVs_microglia_SN_PUT$`LTRdiv(%)` == "na", NA, upreg_HERVs_microglia_SN_PUT$`LTRdiv(%)`)
+upreg_HERVs_microglia_SN_PUT$`LTRdiv(%)` <- as.numeric(as.character(upreg_HERVs_microglia_SN_PUT$`LTRdiv(%)`))
+
+ggplot(upreg_HERVs_microglia_SN_PUT, aes(x=`LTRdiv(%)`)) + geom_histogram() + theme_bw() + labs(x="% of divergence", y="Frequency") + ggtitle("LTR % divergence in upregulated HERVs\nin Microglia", subtitle = "log2FC > 1 & padj < 0.05 ")
+
+upreg_HERVs_microglia_SN_PUT %>% 
+  mutate(myo = `LTRdiv(%)`/0.2) %>% 
+ggplot(aes(x=myo)) + geom_histogram() + theme_bw() + labs(x="Millions of years", y="Frequency") + ggtitle("Estimated age of upregulated HERVs\nin Microglia", subtitle = "log2FC > 1 & padj < 0.05 ")
+
+```
+
+## HERV log2FC comparison across brain regions
+
+Generates a heatmap of log2 fold changes (PD vs Ctl) for upregulated HERVs across SN, PUT, PFC, and AMY regions with significance levels annotated.
+```{r}
+te_res_list_df$SN_4$region <- "SN"
+te_res_list_df$PUT_4$region <- "PUT"
+te_res_list_df$PFC_4$region <- "PFC"
+te_res_list_df$AMY_4$region <- "AMY"
+
+tmp_res <- rbind(te_res_list_df$SN_4,
+te_res_list_df$PUT_4,
+te_res_list_df$PFC_4,
+te_res_list_df$AMY_4)
+
+tmp_res <- unique(tmp_res)
+
+tmp_heatmap_log2FC <- reshape2::dcast(tmp_res, HERV_id~region, value.var = "log2FoldChange")
+rownames(tmp_heatmap_log2FC) <- tmp_heatmap_log2FC$HERV_id
+tmp_heatmap_pvalue <- reshape2::dcast(tmp_res, HERV_id~region, value.var = "pvalue")
+tmp_heatmap_pvalue[is.na(tmp_heatmap_pvalue)] <- 1
+rownames(tmp_heatmap_pvalue) <- tmp_heatmap_pvalue$HERV_id
+tmp_heatmap_pvalue <- tmp_heatmap_pvalue[,-1]
+tmp_heatmap_pvalue <- ifelse(tmp_heatmap_pvalue > 0.05, "", ifelse(tmp_heatmap_pvalue < 0.001, "***", ifelse(tmp_heatmap_pvalue < 0.01, "**", "*")))
+
+bk_neg <- seq(-4,0, length.out=50)
+bk_pos <- seq(0,4, length.out=50)
+bk <- c(bk_neg, bk_pos)
+bk <- unique(bk)
+color_pos <- colorRampPalette(c("white", "red"))(50)
+color_neg <- colorRampPalette(c("blue", "white"))(50)
+tmp_heatmap_log2FC[is.na(tmp_heatmap_log2FC)] <- 0
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1],  breaks = bk, color = c(color_neg, color_pos), 
+                   cluster_cols = F, main = "HERVs DEA", show_rownames = F, 
+                   border_color = F, display_numbers = tmp_heatmap_pvalue)
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1],  breaks = bk, color = c(color_neg, color_pos), 
+                   cluster_cols = F, main = "HERVs DEA", show_rownames = T, 
+                   border_color = F, display_numbers = tmp_heatmap_pvalue, fontsize = 6)
+
+write.xlsx(tmp_res, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/all_HERVs_microglia.xlsx")
+```
+
