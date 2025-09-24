@@ -1,0 +1,436 @@
+---
+title: "Cluster Gene Expression Analysis"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+## Overview
+
+This notebook analyzes gene expression in each cluster across multiple brain regions (SN, PUT, PFC, AMY) in the ASAP-PMDBS snRNA-seq dataset. The workflow focuses on:
+  1. **Data preparation**: loading gene-level counts from trusTEr output, organizing by cluster and region.
+  2. **PD vs Control analysis**: testing differential expression between PD and control within each cluster and region.
+  3. **PD vs Control GSEA**: testing enrichment of GO terms based on DEA (step 2) of each cluster and region. 
+  4. **Functional focus**: visualizing interferon (IFN)-related signatures across clusters.
+  5. **Visualization**: generating mean-difference plots, and violin/boxplots.
+
+### Inputs
+- trusTEr output files with gene counts per cluster/region
+- Sample metadata: ASAP_samplesheet.xlsx
+
+### Outputs
+- Cluster-level gene count matrices (CSV)
+- Differential expression results (excel files)
+- Gene set enrichment analyses results (excel files)
+- Figures showing:
+  - PD vs Control effects
+  - IFN enrichment across clusters
+
+### Notes
+- Only expressed genes (row sums > 0) are tested.
+
+## Setup: Load libraries and helper functions
+Load all required libraries and custom DEA functions
+```{r class.source = 'fold-hide'}
+library(DESeq2)
+library(data.table)
+library(ggpubr)
+library(ggplot2)
+library(tidyverse)
+library(openxlsx)
+library(pheatmap)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(EnhancedVolcano)
+
+
+source("TE_DEA_functions.R")
+```
+
+## Preprocess gene count files
+Gather featureCount outputs, extract region and cluster IDs, merge them into cluster-specific count matrices and save them for convenience as `.csv`
+```{r}
+path <- "~/inbox/ASAP/trusTEr_output_vs2"
+files <- list.files(path, recursive = T, full.names = T)
+files <- files[which(grepl("gene_counts/unique/", files))]
+files <- files[which(!endsWith(files, "summary"))]
+files <- data.frame(files = files)
+files$region <- sapply(str_split(files$files, "/"), `[[`, 7)
+files$cluster <- sapply(str_split(files$files, "_uniqueMap"), `[[`, 1)
+files$cluster <- sapply(str_split(files$cluster, "/"), tail, 1)
+files$cluster_num <- sapply(str_split(files$cluster, "_"), tail, 1)
+files$region_cluster <- paste(files$region, files$cluster_num, sep="_")
+files_split <- split(files, f = c(files$region_cluster))
+regions <- unique(files$region)
+
+for(cluster in as.character(0:7)){
+  for(region in regions){
+    region_cluster <- paste(region, cluster, sep="_")
+    files_region_cluster <- files_split[[region_cluster]]
+    for(f in 1:length(files_region_cluster$files)){
+      file <- files_region_cluster$files[f]
+      if(f == 1){
+        gene_counts <- fread(file, data.table = F)
+        colnames(gene_counts)[ncol(gene_counts)] <- str_remove_all(sapply(str_split(colnames(gene_counts)[ncol(gene_counts)], "/"), tail, 1), "_Aligned.sortedByCoord.out.bam")
+      }else{
+        tmp <- fread(file, data.table = F)
+        colnames(tmp)[ncol(tmp)] <- str_remove_all(sapply(str_split(colnames(tmp)[ncol(tmp)], "/"), tail, 1), "_Aligned.sortedByCoord.out.bam")
+        if(all(tmp$Geneid == gene_counts$Geneid)){
+          gene_counts <- cbind(gene_counts, tmp[,ncol(tmp),drop=F])
+        }else{
+          gene_counts <- merge(gene_counts, tmp[,c("Geneid", colnames(tmp)[ncol(tmp)])], by="Geneid")
+        }
+      }
+    }
+    write.csv(gene_counts, paste("~/inbox/ASAP/trusTEr_output_vs2/", region, "/gene_counts_", paste(region, cluster, sep="_"), ".csv", sep=""), row.names = F)
+  }
+}
+```
+
+## Characterize PD effect per cluster
+Differential expression analyses for PD vs Control pseudobulks for each region and cluster pair. Save per-cluster results (one excel with region per sheet).
+```{r}
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+gene_dds_list <- list()
+gene_exp_list <- list()
+gene_res_list <- list()
+gene_res_list_df <- list()
+regions <- c("SN", "PUT", "AMY", "PFC")
+for(cluster in as.character(0:7)){
+  gene_dds_list[[cluster]] <- list()
+  gene_exp_list[[cluster]] <- list()
+  gene_res_list[[cluster]] <- list()
+  gene_res_list_df[[cluster]] <- list()
+  for(region in regions){
+    print(cluster)
+    print(region)
+    gene_counts <- list()
+    gene_counts[[region]] <- fread(paste("~/inbox/ASAP/trusTEr_output_vs2/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+    rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
+
+    samplesheet_list <- split(samplesheet, f = samplesheet$Region)
+
+    rownames(samplesheet_list[[region]]) <- samplesheet_list[[region]]$Sample
+    samples_cluster <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+    samples_cluster <- samples_cluster[which(samples_cluster %in% colnames(gene_counts[[region]]))]
+    rownames(samplesheet_list[[region]]) <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+    rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
+    
+    expressed_genes <- rownames(gene_counts[[region]])[which(rowSums(gene_counts[[region]][,samples_cluster]) > 0)]
+    gene_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((gene_counts[[region]][expressed_genes,samples_cluster]+1), samplesheet_list[[region]][samples_cluster,], design =  ~ Dx)
+    gene_dds_list[[cluster]][[region]]$Dx <- relevel(gene_dds_list[[cluster]][[region]]$Dx, "Ctl")
+    gene_dds_list[[cluster]][[region]] <- DESeq(gene_dds_list[[cluster]][[region]])
+    gene_exp_list[[cluster]][[region]] <- getAverage(gene_dds_list[[cluster]][[region]])
+    gene_res_list[[cluster]][[region]] <- results(gene_dds_list[[cluster]][[region]], )
+    gene_res_list_df[[cluster]][[region]] <- as.data.frame(gene_res_list[[cluster]][[region]])
+    gene_res_list_df[[cluster]][[region]]$gene_id <- rownames(gene_res_list_df[[cluster]][[region]])
+    print(names(gene_res_list_df[[cluster]]))
+  }
+  openxlsx::write.xlsx(gene_res_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_cluster_", cluster, "_PD_DEA_snRNAseq_res.xlsx", sep=""))
+}
+
+
+```
+
+## Mean plots of PD vs Control
+Visualize mean expression vs log2FC for each cluster-region
+```{r}
+volcano_plots_list <- list()
+mean_plots_list <- list()
+for(cluster in as.character(0:7)){
+  volcano_plots_list[[cluster]] <- list()
+  mean_plots_list[[cluster]] <- list()
+  for(region in regions){ 
+
+    tmp <- EnhancedVolcano(gene_res_list[[cluster]][[region]], 
+                                               drawConnectors = T, 
+                                               lab = NA, 
+                                               x = 'log2FoldChange',
+                                               y = 'padj',
+                                               pCutoff = 0.05,
+                                               FCcutoff = 1)
+    tmp$data$Sig <- ifelse(tmp$data$log2FoldChange > 1 & tmp$data$Sig == "FC_P", "Upregulated", 
+                                               ifelse(tmp$data$log2FoldChange < -1 & tmp$data$Sig == "FC_P", "Downregulated", "Not significant"))
+    tmp$data$Sig <- paste(tmp$data$Sig, table(tmp$data$Sig)[tmp$data$Sig], sep = ": ")
+    
+    not_sig_lab <- unique(tmp$data$Sig)[startsWith(unique(tmp$data$Sig), "Not significant")]
+    up_sig_lab <- unique(tmp$data$Sig)[startsWith(unique(tmp$data$Sig), "Upregulated")]
+    down_sig_lab <- unique(tmp$data$Sig)[startsWith(unique(tmp$data$Sig), "Downregulated")]
+    
+    if(length(unique(tmp$data$Sig)) == 1){
+      point_colours <- c("grey")
+    }
+    if(length(unique(tmp$data$Sig)) == 2){
+      if(any(str_detect(unique(tmp$data$Sig), "Upregulated"))){
+        point_colours <- c("grey","tomato")
+      }
+    }
+    if(length(unique(tmp$data$Sig)) == 2){
+      if(any(str_detect(unique(tmp$data$Sig), "Downregulated"))){
+        point_colours <- c("grey","darkturquoise")
+      }
+    }
+    if(length(unique(tmp$data$Sig)) == 3){
+      point_colours <- c("grey","darkturquoise", "tomato")
+      names(point_colours) <- c(not_sig_lab, down_sig_lab, up_sig_lab)
+    }
+    point_sizes <- c(1,2,2)
+    names(point_sizes) <- c(not_sig_lab, down_sig_lab, up_sig_lab)  
+    title <- paste(region, cluster, sep=": cluster ")
+    
+    tmp <- tmp$data
+    volcano_plots_list[[cluster]][[region]] <- ggplot(tmp, aes(x=log2FoldChange, y=-log10(padj), colour=Sig, size=Sig)) + geom_point(alpha=0.7) + 
+      geom_vline(xintercept = 1, linetype="dotted") + geom_vline(xintercept = -1, linetype="dotted") + 
+      geom_hline(yintercept = -log10(0.05), linetype="dotted") + labs(colour="") + 
+      scale_color_manual(values = point_colours)  + 
+      scale_size_manual(values = point_sizes, guide="none") +
+      theme_bw() +
+      theme(text = element_text(size=15), panel.grid.minor = element_blank(), panel.grid.major = element_blank()) +
+      ggtitle(title)
+    
+    effect <- unique(samplesheet_list[[region]][which(samplesheet_list[[region]]$Dx != "Ctl"),"Dx"])
+    mean_plots_list[[cluster]][[region]] <- meanPlot_cus(exp = gene_exp_list[[cluster]][[region]]$Mean,
+                                         test = gene_res_list[[cluster]][[region]], 
+                                         col1 = ifelse(length(unique(tmp$Sig)) == 3, "tomato", 
+                                                       ifelse(any(str_detect(unique(tmp$Sig), "Downregulated")), "grey", "darkturquoise")), 
+                                         col2 = ifelse(length(unique(tmp$Sig)) == 3, "darkturquoise", 
+                                                       ifelse(any(str_detect(unique(tmp$Sig), "Downregulated")), "darkturquoise", "grey")), 
+                                         col3 = ifelse(length(unique(tmp$Sig)) == 3, "grey", 
+                                                       ifelse(any(str_detect(unique(tmp$Sig), "Upregulated")), "tomato", "grey")),
+                                         c1 = effect, c2="Ctl", p = 0.05, l=1, ttl = title, repel = F)
+      
+  }
+}
+
+mean_plots_list
+```
+
+## Some helper functions for Gene Set Enrichment Analyses
+```{r}
+set.seed(10)
+gse_dotplot <- function(df){
+  genelist <- df[which(!is.na(df$log2FoldChange)),c("log2FoldChange", "gene_id"), drop=F]
+  genelist <- genelist[order(genelist$log2FoldChange, decreasing = T),]
+
+  genelist_FC <- genelist$log2FoldChange
+  names(genelist_FC) <- genelist$gene_id
+  gse <- gseGO(geneList=genelist_FC,
+               ont ="ALL",
+               keyType = "SYMBOL",
+               minGSSize = 3,
+               maxGSSize = 800,
+               seed = T,
+               pvalueCutoff = 0.05,
+               verbose = TRUE,
+               OrgDb = org.Hs.eg.db,
+               pAdjustMethod = "BH")
+  return(gse)
+}
+```
+
+## Gene Set Enrichment Analyses (GSEA)
+
+For some reason the seed is not taken in by clusterProfiler, so the results from here onwards will be using the original run I did on this code (same but ever so slightly different numbers, loaded here at the end of the chunk). The clean data provided will be the original run I did. 
+
+* Test whether there is enrichment of GO-terms within the DEA results (log2FC based).
+* Save results to excel 
+```{r}
+gse_list <- list()
+gse_list_df <- list()
+gse_plot_list <- list()
+for(cluster in as.character(0:7)){
+  gse_list[[cluster]] <- list()
+  gse_list_df[[cluster]] <- list()
+  gse_plot_list[[cluster]] <- list()
+  for(region in regions){ 
+    print(cluster)
+    print(region)
+    gse_list[[cluster]][[region]] <- gse_dotplot(df = gene_res_list_df[[cluster]][[region]])
+    gse_list_df[[cluster]][[region]] <- gse_list[[cluster]][[region]]@result
+    if(!is.null(gse_plot_list[[cluster]][[region]])){
+    # gse_plot_list[[cluster]][[region]] <- gse_pretty_dotplot(gse = gse_list[[cluster]][[region]], topn = 30) + ggtitle(paste(region, cluster, sep=" cluster: "))
+    }
+  }
+  if(length(gse_list_df[[cluster]]) > 0){
+  openxlsx::write.xlsx(gse_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gse_cluster", cluster, "PD_GSEA_snRNAseq_res.xlsx", sep="_"))
+  }
+}
+
+# save.image("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/src/r_scripts/gene_uniq_DEA.Rdata")
+load("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/src/r_scripts/gene_uniq_DEA.Rdata")
+```
+
+This chunk is just to show you that the results of the gene DEA are indeed identical as before
+```{r}
+mean_plots_list
+```
+
+## Another helper function for plotting the Gene Set Enrichment Analyses results
+```{r}
+gse_pretty_dotplot <- function(gse, topn = 10, terms = NA){
+  gse <- gse@result
+  # gse <- gse[which(gse$ONTOLOGY == "BP"),]
+  gse$sign <- ifelse(gse$enrichmentScore > 0, "Activated", "Supressed")
+  gse$num_genes <- sapply(str_split(gse$core_enrichment, "/"), length)
+  gse$gene_ratio <- gse$num_genes / gse$setSize
+  gse$Description <- factor(gse$Description, levels = gse[order(gse$gene_ratio), "Description"])
+  
+  if(!all(is.na(terms))){
+    gse <- gse %>% 
+      drop_na() %>% 
+      filter(ID %in% terms)
+  }else{
+    gse <- gse[order(gse$NES, -log10(gse$p.adjust), decreasing = T),]
+  }
+  gse %>% 
+      drop_na() %>% 
+      ggplot(aes(x=Description, y=gene_ratio, size = num_genes, fill = p.adjust)) + geom_point(shape=21, colour="lightgrey") + facet_wrap(.~sign) + coord_flip() + theme_pubr(legend = "right", border = T) + labs(x="", fill="Padj", y = "Gene ratio", size = "Num genes") + scale_fill_gradientn(colors = c("firebrick1", "gray94")) + scale_size_continuous(range = c(2,8)) + theme(axis.text.y = element_text(size=10), strip.text.x = element_text(size = 10),axis.text.x = element_text(size=10),legend.text = element_text(size=10),legend.title = element_text(size=10)) 
+}
+
+```
+
+
+## IFN and viral related terms upregulated in microglia SN
+```{r}
+cluster = "4"
+region = "SN"
+gse_pretty_dotplot(gse = gse_list[[cluster]][[region]], topn = 30) + ggtitle(paste(region, cluster, sep=" cluster: "))
+ifn_viral_related_go <- gse_list_df[["4"]][["SN"]][which(grepl("interferon|vir", gse_list_df[["4"]][["SN"]]$Description)), "ID"]
+gse_pretty_dotplot(gse = gse_list[[cluster]][[region]], topn = 30, terms = c(ifn_viral_related_go)) + ggtitle(paste(region, cluster, sep=" cluster: "))
+```
+
+## IFN related genes
+
+This chunk makes boxplots of genes in the core enrichment of IFN-related terms found in microglia (cluster 4) SN.
+```{r}
+ifn_related_go <- gse_list_df[["4"]][["SN"]][which(grepl("interferon", gse_list_df[["4"]][["SN"]]$Description)), "Description"]
+
+tmp <- sapply(sapply(gse_list_df[["4"]][["SN"]][which(gse_list_df[["4"]][["SN"]]$Description %in% ifn_related_go), "core_enrichment"], str_split, "/"), unlist)
+names(tmp) <- NULL
+tmp <- unique(unlist(tmp))
+
+tmp_present_regions <- tmp[which(tmp %in% intersect(intersect(intersect(rownames(gene_counts_norm$`4`$SN), rownames(gene_counts_norm$`4`$PUT)), rownames(gene_counts_norm$`4`$PFC)), rownames(gene_counts_norm$`4`$AMY)))]
+
+tmp_present_regions_log2FC1 <- unique(c(tmp_present_regions[which(gene_res_list_df$`4`$SN[tmp_present_regions, "log2FoldChange"] > 1)], 
+                                        tmp_present_regions[which(gene_res_list_df$`4`$PUT[tmp_present_regions, "log2FoldChange"] > 1)],
+                                        tmp_present_regions[which(gene_res_list_df$`4`$PFC[tmp_present_regions, "log2FoldChange"] > 1)],
+tmp_present_regions[which(gene_res_list_df$`4`$AMY[tmp_present_regions, "log2FoldChange"] > 1)]))
+
+
+# Pseudobulks
+gene_counts_tmp_present_regions_log2FC1 <- cbind(gene_counts_norm$`4`$SN[tmp_present_regions_log2FC1,],
+                                                 gene_counts_norm$`4`$PUT[tmp_present_regions_log2FC1,],
+                                                 gene_counts_norm$`4`$PFC[tmp_present_regions_log2FC1,],
+                                                 gene_counts_norm$`4`$AMY[tmp_present_regions_log2FC1,])
+
+gene_counts_tmp_present_regions_log2FC1_melt <- reshape2::melt(gene_counts_tmp_present_regions_log2FC1)
+gene_counts_tmp_present_regions_log2FC1_melt$Var2 <- substr(as.character(gene_counts_tmp_present_regions_log2FC1_melt$Var2),1,nchar(as.character(gene_counts_tmp_present_regions_log2FC1_melt$Var2))-2)
+gene_counts_tmp_present_regions_log2FC1_melt <- merge(gene_counts_tmp_present_regions_log2FC1_melt, samplesheet, by.x="Var2", by.y="Sample")
+
+ifn_core_enrichment_violins <- function(region){
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats <- as_tibble(gene_res_list_df$`4`[[region]][as.character(unique(gene_counts_tmp_present_regions_log2FC1_melt$Var1)), ] )
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$Var1 <- gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$gene_id
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$group1 <- "Ctl"
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$group2 <- "PD"
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$y.position <- max(log2(gene_counts_tmp_present_regions_log2FC1_melt$value+1))
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$xmin <- gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$gene_id
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$xmax <- gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$gene_id
+  gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$signif <- ifelse(gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$pvalue < 0.001, "***", ifelse(gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$pvalue < 0.01, "**", ifelse(gene_counts_tmp_present_regions_log2FC1_melt_sn_stats$pvalue < 0.05, "*", "")))
+  
+  plt <- gene_counts_tmp_present_regions_log2FC1_melt %>% 
+    filter(Region == region) %>% 
+    mutate(log2_value = log2(value + 1)) %>% 
+    ggboxplot(x="Var1", y="log2_value", fill="Dx", outlier.shape = NA, alpha=0.5) +
+    stat_pvalue_manual(gene_counts_tmp_present_regions_log2FC1_melt_sn_stats, label = "signif", tip.length = 0.01) +
+    geom_point(aes(color=Dx), size=0.3, position = position_jitterdodge(jitter.width = 0.2)) + theme_bw() + 
+    labs(x="", y="log2(Normalized Expression + 1)") +
+    ggtitle(paste("IFN core enrichment genes: Pseudobulk per ", paste(region, " sample")), subtitle = "log2FC > 1 in any region") + theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  return(plt)
+}
+
+
+ggarrange(ifn_core_enrichment_violins("SN"),
+ifn_core_enrichment_violins("PUT"),
+ifn_core_enrichment_violins("PFC"),
+ifn_core_enrichment_violins("AMY"), ncol=1, common.legend = T)
+```
+
+### Avg log2FC heatmaps
+
+Same idea, but now on a heatmap and regardless of p values.
+```{r}
+gene_res_list_df$`4`$SN$region <- "SN"
+gene_res_list_df$`4`$PUT$region <- "PUT"
+gene_res_list_df$`4`$PFC$region <- "PFC"
+gene_res_list_df$`4`$AMY$region <- "AMY"
+
+tmp_res <- rbind(gene_res_list_df$`4`$SN[tmp,],
+gene_res_list_df$`4`$PUT[tmp,],
+gene_res_list_df$`4`$PFC[tmp,],
+gene_res_list_df$`4`$AMY[tmp,])
+
+tmp_res <- unique(tmp_res)
+
+tmp_heatmap_log2FC <- reshape2::dcast(tmp_res, gene_id~region, value.var = "log2FoldChange")
+tmp_heatmap_log2FC <- tmp_heatmap_log2FC[-nrow(tmp_heatmap_log2FC), -ncol(tmp_heatmap_log2FC)]
+rownames(tmp_heatmap_log2FC) <- tmp_heatmap_log2FC$gene_id
+tmp_heatmap_pvalue <- reshape2::dcast(tmp_res, gene_id~region, value.var = "pvalue")
+tmp_heatmap_pvalue <- tmp_heatmap_pvalue[-nrow(tmp_heatmap_pvalue), -ncol(tmp_heatmap_pvalue)]
+tmp_heatmap_pvalue[is.na(tmp_heatmap_pvalue)] <- 1
+rownames(tmp_heatmap_pvalue) <- tmp_heatmap_pvalue$gene_id
+tmp_heatmap_pvalue <- tmp_heatmap_pvalue[,-1]
+tmp_heatmap_pvalue <- ifelse(tmp_heatmap_pvalue > 0.05, "", ifelse(tmp_heatmap_pvalue < 0.001, "***", ifelse(tmp_heatmap_pvalue < 0.01, "**", "*")))
+
+bk_neg <- seq(-3,0, length.out=50)
+bk_pos <- seq(0,3, length.out=50)
+bk <- c(bk_neg, bk_pos)
+bk <- unique(bk)
+color_pos <- colorRampPalette(c("white", "red"))(50)
+color_neg <- colorRampPalette(c("blue", "white"))(50)
+tmp_heatmap_log2FC[is.na(tmp_heatmap_log2FC)] <- 0
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1], breaks = bk, color = c(color_neg, color_pos), cluster_cols = F, main = "Core enrichment of enriched IFN-related\nGO terms in SN microglia", show_rownames = T, border_color = F, display_numbers = tmp_heatmap_pvalue)
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1], breaks = bk, color = c(color_neg, color_pos), cluster_cols = F, main = "Core enrichment of enriched IFN-related\nGO terms in SN microglia", show_rownames = F, border_color = F, display_numbers = tmp_heatmap_pvalue)
+
+write.xlsx(tmp_res, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/IFN_related_genes_GO_microglia.xlsx")
+write.table(tmp_heatmap_log2FC, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_SN_PUT_PFC_AMY_IFN_related_genes_microglia_log2FC.tab", quote = F, row.names = F, sep="\t")
+```
+
+## Viral related genes
+
+Same idea but now with genes in core enrichment of viral related terms.
+```{r}
+viral_related_go <- gse_list_df[["4"]][["SN"]][which(grepl("vir", gse_list_df[["4"]][["SN"]]$Description)), "Description"]
+
+tmp <- sapply(sapply(gse_list_df[["4"]][["SN"]][which(gse_list_df[["4"]][["SN"]]$Description %in% viral_related_go), "core_enrichment"], str_split, "/"), unlist)
+names(tmp) <- NULL
+tmp <- unique(unlist(tmp))
+
+gene_res_list_df$`4`$SN$region <- "SN"
+gene_res_list_df$`4`$PUT$region <- "PUT"
+gene_res_list_df$`4`$PFC$region <- "PFC"
+gene_res_list_df$`4`$AMY$region <- "AMY"
+
+tmp_res <- rbind(gene_res_list_df$`4`$SN[tmp,],
+gene_res_list_df$`4`$PUT[tmp,],
+gene_res_list_df$`4`$PFC[tmp,],
+gene_res_list_df$`4`$AMY[tmp,])
+
+tmp_res <- unique(tmp_res)
+
+tmp_heatmap_log2FC <- reshape2::dcast(tmp_res, gene_id~region, value.var = "log2FoldChange")
+tmp_heatmap_log2FC <- tmp_heatmap_log2FC[-nrow(tmp_heatmap_log2FC), -ncol(tmp_heatmap_log2FC)]
+rownames(tmp_heatmap_log2FC) <- tmp_heatmap_log2FC$gene_id
+tmp_heatmap_pvalue <- reshape2::dcast(tmp_res, gene_id~region, value.var = "pvalue")
+tmp_heatmap_pvalue <- tmp_heatmap_pvalue[-nrow(tmp_heatmap_pvalue), -ncol(tmp_heatmap_pvalue)]
+tmp_heatmap_pvalue[is.na(tmp_heatmap_pvalue)] <- 1
+rownames(tmp_heatmap_pvalue) <- tmp_heatmap_pvalue$gene_id
+tmp_heatmap_pvalue <- tmp_heatmap_pvalue[,-1]
+tmp_heatmap_pvalue <- ifelse(tmp_heatmap_pvalue > 0.05, "", ifelse(tmp_heatmap_pvalue < 0.001, "***", ifelse(tmp_heatmap_pvalue < 0.01, "**", "*")))
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1], breaks = bk, color = c(color_neg, color_pos), cluster_cols = F, main = "Core enrichment of enriched viral-related\nGO terms in SN microglia", show_rownames = T, border_color = F, display_numbers = tmp_heatmap_pvalue)
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1], breaks = bk, color = c(color_neg, color_pos), cluster_cols = F, main = "Core enrichment of enriched viral-related\nGO terms in SN microglia", show_rownames = F, border_color = F)
+```
+
