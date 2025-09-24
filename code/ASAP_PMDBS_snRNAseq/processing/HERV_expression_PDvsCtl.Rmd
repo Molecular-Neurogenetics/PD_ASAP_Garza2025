@@ -540,5 +540,7 @@ dump(
     "meanPlot_cus", "box_pseudobulk", "pick_colors_meanplot"), 
   file = "TE_DEA_functions.R"
 )
+
+saveRDS(herv_counts_norm, "HERV_norm_expression.rds")
 ```
 
