@@ -1,0 +1,223 @@
+---
+title: "HERV and IFN Gene Expression in Microglia: Correlation with Braak Stage"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Overview
+
+This notebook analyzes the expression of **upregulated HERVs** and **IFN-related genes** in microglia. The objectives are:
+
+1. To **compare expression profiles** of IFN-related genes and HERVs across brain regions.
+2. To **associate expression levels** of selected genes and HERVs with **Braak stage** using linear fits with p-values and R² values.
+
+---
+
+## Load libraries and input data
+```{r}
+library(openxlsx)
+library(ggplot2)
+library(tidyverse)
+library(data.table)
+library(stringr)
+library(ggpmisc)
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+genes <- read.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/IFN_related_genes_GO_microglia.xlsx")
+hervs <- read.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/all_HERVs_microglia.xlsx")
+
+genes$type <- "IFN_gene"
+hervs$type <- "HERV"
+colnames(genes)[6] <- "id"
+colnames(hervs)[6] <- "id"
+```
+
+## IFN-related gene expression & HERV expression
+
+Combine and visualize IFN gene vs HERV expression across regions.
+Boxplot and jitter showing log2FC for genes and HERVs in different regions
+```{r}
+genes_hervs <- rbind(hervs[,c("log2FoldChange","pvalue", "id", "region", "type")],
+                     genes[,c("log2FoldChange","pvalue", "id", "region", "type")])
+
+genes_hervs$region <- factor(genes_hervs$region, levels = c("SN", "PUT", "PFC", "AMY"))
+
+ggplot(genes_hervs, aes(x=type, y=log2FoldChange)) + geom_jitter(aes(color=ifelse(log2FoldChange > 0, T, F), size=ifelse(log2FoldChange > 0, T, F)),height = 0, width = 0.2, alpha=0.5) + geom_boxplot(outliers = F, width=0.5, alpha=0.7) + facet_wrap(.~region, ncol=4) + theme_bw() + labs(x="") + ggtitle("IFN-related genes & HERV upregulation") + scale_color_manual(values=c("TRUE" = "tomato", "FALSE"= "grey")) + theme(legend.position = "None") + scale_size_manual(values=c("TRUE" = 1, "FALSE"= 0.5))
+```
+
+## Filter Substantia Nigra (SN) pseudobulks by nuclei count
+
+Load nuclei counts per cluster for SN and remove small pseudobulks
+```{r}
+SN_num_nuclei <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/number_nuclei/SN_clusters.txt", header = F, skip = 1)
+colnames(SN_num_nuclei) <- c("cluster", "num_nuclei")
+num_nuclei <- SN_num_nuclei
+# There is a "total" row. I'll remove that for convenience
+num_nuclei <- num_nuclei[which(num_nuclei$cluster != "total"),]
+rownames(num_nuclei) <- num_nuclei$cluster
+  
+num_nuclei <- num_nuclei[which(num_nuclei$num_nuclei > 50),] # Remove tiny pseudobulks
+```
+
+## Compare IFN Gene expression to donor's Braak stage
+
+- Load normalized gene counts from script `gene_DEA_GSEA.Rmd`
+- Normalize and reshape gene expression data
+- Merge with metadata
+- Filter significant upregulated IFN genes in SN
+- Subset data to PD samples with known Braak stage
+```{r}
+load("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/src/r_scripts/gene_uniq_DEA.Rdata")
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+gene_counts_norm_microglia_SN <- as.data.frame(gene_counts_norm$`4`$SN[genes$gene_id,])
+gene_counts_norm_microglia_SN$gene_id <- rownames(gene_counts_norm_microglia_SN)
+gene_counts_norm_microglia_SN_melt <- reshape2::melt(gene_counts_norm_microglia_SN)
+gene_counts_norm_microglia_SN_melt$sample <- str_sub(gene_counts_norm_microglia_SN_melt$variable, end = -3)
+gene_counts_norm_microglia_SN_melt <- merge(gene_counts_norm_microglia_SN_melt, samplesheet, by.x= "sample", by.y="Sample")
+genes_split_region <- split(genes, f = genes$region)
+
+# Filter significant upregulated IFN genes in SN
+upreg_IFN_genes_SN <- genes_split_region$SN[which(genes_split_region$SN$log2FoldChange > 0 & genes_split_region$SN$pvalue < 0.05), "gene_id"]
+
+gene_counts_norm_microglia_SN_melt_tmp <- gene_counts_norm_microglia_SN_melt %>% 
+  filter(Dx == "PD") %>% 
+  filter(Braak != "pending") %>% # Subset data to PD samples with known Braak stage
+  filter(gene_id %in% upreg_IFN_genes_SN) 
+
+gene_counts_norm_microglia_SN_melt_tmp$Braak <- as.numeric(gene_counts_norm_microglia_SN_melt_tmp$Braak)
+```
+
+## Visualization of selected IFN Genes vs Braak Stage (All Upregulated)
+```{r}
+gene_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(gene_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+ggplot(aes(x=as.factor(Braak), y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ geom_violin(alpha=0.7) + geom_boxplot(width= 0.2, outliers = F) + theme_bw() 
+
+gene_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(gene_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+ggplot(aes(x=Braak, y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ stat_poly_line(formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label))) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label))) + theme_bw()
+
+gene_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(gene_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(gene_id == "CIITA") %>% 
+ggplot(aes(x=as.factor(Braak), y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ geom_boxplot(width= 0.2, alpha=0.4, outliers = F) + theme_bw() 
+
+gene_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(gene_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(gene_id == "CIITA") %>% 
+ggplot(aes(x=Braak, y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ stat_poly_line(formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label))) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label))) + theme_bw()
+
+gene_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(gene_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(gene_id == "TLR4") %>% 
+ggplot(aes(x=as.factor(Braak), y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ geom_boxplot(width= 0.2, alpha=0.4, outliers = F) + theme_bw() 
+
+gene_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(gene_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(gene_id == "TLR4") %>% 
+ggplot(aes(x=Braak, y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ stat_poly_line(formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label))) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label))) + theme_bw()
+
+```
+## Compare HERV expression to donor's Braak stage
+
+- Load list of upregulated HERVs in SN microglia
+- Load normalized HERV counts from script `HERV_expression_PDvsCtl.Rmd`
+- Normalize and reshape HERV expression data
+- Merge with metadata
+- Subset data to PD samples with known Braak stage
+```{r}
+res_hervs_SN_microglia <- read.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/all_HERVs_microglia.xlsx")
+upreg_hervs_SN_microglia <- res_hervs_SN_microglia %>% 
+  filter(region == "SN" & padj < 0.05 & log2FoldChange > 1)
+herv_counts_norm <- readRDS("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/HERV_norm_expression.rds")
+
+hervs_counts_norm_microglia_SN <- as.data.frame(herv_counts_norm$SN_4[upreg_hervs_SN_microglia$HERV_id,])
+hervs_counts_norm_microglia_SN$hervs_id <- rownames(hervs_counts_norm_microglia_SN)
+hervs_counts_norm_microglia_SN_melt <- reshape2::melt(hervs_counts_norm_microglia_SN)
+hervs_counts_norm_microglia_SN_melt$variable <- as.character(hervs_counts_norm_microglia_SN_melt$variable)
+hervs_counts_norm_microglia_SN_melt$sample <- str_sub(hervs_counts_norm_microglia_SN_melt$variable, end = -3)
+
+hervs_counts_norm_microglia_SN_melt <- merge(hervs_counts_norm_microglia_SN_melt, samplesheet, by.x= "sample", by.y="Sample")
+
+hervs_split_region <- split(hervs, f = hervs$region)
+upreg_hervs_SN <- hervs_split_region$SN[which(hervs_split_region$SN$log2FoldChange > 0 & hervs_split_region$SN$pvalue < 0.05), "id"]
+
+hervs_counts_norm_microglia_SN_melt_tmp <- hervs_counts_norm_microglia_SN_melt %>% 
+  filter(Dx == "PD") %>% 
+  filter(Braak != "pending") %>% 
+  filter(hervs_id %in% upreg_hervs_SN) 
+
+hervs_counts_norm_microglia_SN_melt_tmp$Braak <- as.numeric(hervs_counts_norm_microglia_SN_melt_tmp$Braak)
+
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+ggplot(aes(x=as.factor(Braak), y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ geom_violin(alpha=0.7) + geom_boxplot(width= 0.2, outliers = F) + theme_bw()
+
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+ggplot(aes(x=Braak, y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ stat_poly_line(formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label))) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label))) + theme_bw()
+
+```
+
+## Visualization of selected HERVs vs Braak Stage
+```{r}
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(hervs_id == "HERV_dup2643") %>% 
+ggplot(aes(x=as.factor(Braak), y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ geom_boxplot(width= 0.2, alpha=0.4, outliers = F) + theme_bw() 
+
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(hervs_id == "HERV_dup2643") %>% 
+ggplot(aes(x=Braak, y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ stat_poly_line(formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label))) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label))) + theme_bw()
+
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(hervs_id == "HERV_dup2623") %>% 
+ggplot(aes(x=as.factor(Braak), y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ geom_boxplot(width= 0.2, alpha=0.4, outliers = F) + theme_bw() 
+
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(hervs_id == "HERV_dup2623") %>% 
+ggplot(aes(x=Braak, y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ stat_poly_line(formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label))) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label))) + theme_bw()
+
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(hervs_id == "HERV_dup2412") %>% 
+ggplot(aes(x=as.factor(Braak), y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ geom_boxplot(width= 0.2, alpha=0.4, outliers = F) + theme_bw() 
+
+hervs_counts_norm_microglia_SN_melt_tmp %>% 
+  filter(hervs_counts_norm_microglia_SN_melt_tmp$variable %in% num_nuclei$cluster) %>% 
+  filter(hervs_id == "HERV_dup2412") %>% 
+ggplot(aes(x=Braak, y=log2(value+1))) + geom_jitter(width = 0.2, size=0.3) + 
+ stat_poly_line(formula = y ~ x) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label))) +
+  stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label))) + theme_bw()
+```
+
