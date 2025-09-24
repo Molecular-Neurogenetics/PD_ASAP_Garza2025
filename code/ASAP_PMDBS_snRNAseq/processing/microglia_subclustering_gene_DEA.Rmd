@@ -43,6 +43,8 @@ library(tidyverse)
 library(openxlsx)
 
 source("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/TE_DEA_functions.R")
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+samplesheet <- samplesheet[!is.na(samplesheet$Sample),]
 ```
 
 ## Preprocess gene count files
@@ -60,11 +62,12 @@ files$cluster_num <- sapply(str_split(files$cluster, "_"), tail, 1)
 files$region_cluster <- paste(files$region, files$cluster_num, sep="_")
 files_split <- split(files, f = c(files$region_cluster))
 regions <- c("SN", "PUT", "PFC", "AMY")
-for(cluster in as.character(0:8)){
-  for(region in regions){
+for(region in regions){
+  for(cluster in as.character(0:8)){
     print(paste0(region, " cluster: ", cluster))
     region_cluster <- paste(region, cluster, sep="_")
     files_region_cluster <- files_split[[region_cluster]]
+    print(length(files_region_cluster$files))
     for(f in 1:length(files_region_cluster$files)){
       file <- files_region_cluster$files[f]
       if(f == 1 & region == regions[1] & cluster == "0"){
@@ -80,39 +83,30 @@ for(cluster in as.character(0:8)){
         }
       }
     }
-    write.csv(gene_counts, paste("~/inbox/ASAP/truster_output_microglia/", region, "/gene_counts_", paste(region, cluster, sep="_"), ".csv", sep=""), row.names = F)
+    clusters_region_all <- str_remove(files_split[[region_cluster]]$cluster, paste0(region, "_"))
+    columns_keep <- clusters_region_all[which(clusters_region_all %in% colnames(gene_counts))]
+    gene_counts <- gene_counts[,c(colnames(gene_counts)[1:6], columns_keep)]
+    write.csv(gene_counts, paste("~/inbox/ASAP/truster_output_microglia/", region, "/gene_counts_", paste0(region, "_", cluster), ".csv", sep=""), row.names = F)
   }
 }
 
-length(colnames(gene_counts))
 ```
 
 ## Characterize clusters
 Characterize cluster identity within each microglia subcluster. Run DEA comparing each subcluster to "other" subclusters and save results.
 ```{r}
-gene_cluster_dds_list <- list()
-gene_cluster_exp_list <- list()
-gene_cluster_res_list <- list()
-gene_cluster_res_list_df <- list()
-samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
-samplesheet <- samplesheet[!is.na(samplesheet$Sample),]
-
+gene_counts <- list()
 for(region in regions){
-  gene_cluster_dds_list[[cluster]] <- list()
-  gene_cluster_exp_list[[cluster]] <- list()
-  gene_cluster_res_list[[cluster]] <- list()
-  gene_cluster_res_list_df[[cluster]] <- list()
-  gene_counts <- list()
   for(cluster in as.character(0:8)){
     print(cluster)
     print(region)
     if(cluster == "0"){
-      gene_counts[[region]] <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+      gene_counts[[region]] <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region, "/gene_counts_", region,"_", cluster,".csv", sep=""), sep = ",", data.table = F)
       samplesheet_clusters <- samplesheet
       samplesheet_clusters$cluster <- cluster
       samplesheet_clusters$samples_cluster <- paste(samplesheet_clusters$Sample, cluster, sep="_")
     }else{
-      tmp <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+      tmp <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region, "/gene_counts_", region,"_", cluster,".csv", sep=""), sep = ",", data.table = F)
       if(all(tmp$Geneid == gene_counts[[region]]$Geneid)){
         gene_counts[[region]] <- cbind(gene_counts[[region]], tmp[,c(7:ncol(tmp))])
       }else{
@@ -123,37 +117,60 @@ for(region in regions){
       samplesheet_tmp$cluster <- cluster
       samplesheet_clusters <- rbind(samplesheet_clusters, samplesheet_tmp)
     }
+    rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
   }
-  rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
-  samplesheet_clusters <- samplesheet_clusters[which(samplesheet_clusters$samples_cluster %in% colnames(gene_counts[[region]])),]
-  expressed_genes <- rownames(gene_counts[[region]])[which(rowSums(gene_counts[[region]][,samplesheet_clusters$samples_cluster]) > 0)]
+}
+
+all(rownames(gene_counts$SN) == rownames(gene_counts$PUT))
+all(rownames(gene_counts$SN) == rownames(gene_counts$PFC))
+all(rownames(gene_counts$SN) == rownames(gene_counts$AMY))
+
+gene_counts_all <- cbind(gene_counts$SN,
+                         gene_counts$PUT[,7:ncol(gene_counts$PUT)],
+                         gene_counts$PFC[,7:ncol(gene_counts$PFC)],
+                         gene_counts$AMY[,7:ncol(gene_counts$AMY)])
+
+gene_cluster_dds_list <- list()
+gene_cluster_exp_list <- list()
+gene_cluster_res_list <- list()
+gene_cluster_res_list_df <- list()
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+samplesheet <- samplesheet[!is.na(samplesheet$Sample),]
+
+for(cluster in as.character(0:8)){
+  gene_cluster_dds_list[[cluster]] <- list()
+  gene_cluster_exp_list[[cluster]] <- list()
+  gene_cluster_res_list[[cluster]] <- list()
+  gene_cluster_res_list_df[[cluster]] <- list()
+  
+  samplesheet_clusters <- samplesheet_clusters[which(samplesheet_clusters$samples_cluster %in% colnames(gene_counts_all)),]
+  expressed_genes <- rownames(gene_counts_all)[which(rowSums(gene_counts_all[,samplesheet_clusters$samples_cluster]) > 0)]
   rownames(samplesheet_clusters) <- samplesheet_clusters$samples_cluster
   
-  for(cluster in as.character(0:8)){
-    samplesheet_clusters$condition <- ifelse(samplesheet_clusters$cluster == cluster, cluster, "other")
-    gene_cluster_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((gene_counts[[region]][expressed_genes,samplesheet_clusters$samples_cluster]+1), samplesheet_clusters[samplesheet_clusters$samples_cluster,], design =  ~ condition)
-      gene_cluster_dds_list[[cluster]][[region]]$condition <- relevel(gene_cluster_dds_list[[cluster]][[region]]$condition, "other")
-      gene_cluster_dds_list[[cluster]][[region]] <- DESeq(gene_cluster_dds_list[[cluster]][[region]])
-      gene_cluster_res_list[[cluster]][[region]] <- results(gene_cluster_dds_list[[cluster]][[region]], )
-      gene_cluster_res_list_df[[cluster]][[region]] <- as.data.frame(gene_cluster_res_list[[cluster]][[region]])
-      gene_cluster_res_list_df[[cluster]][[region]]$gene_id <- rownames(gene_cluster_res_list_df[[cluster]][[region]])
-      print(names(gene_cluster_res_list_df[[cluster]]))
-    }
-    openxlsx::write.xlsx(gene_cluster_res_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_microglia_subcluster_", cluster, "_cluster_DEA_snRNAseq_res.xlsx", sep=""))
-  }
+  samplesheet_clusters$condition <- ifelse(samplesheet_clusters$cluster == cluster, cluster, "other")
+  gene_cluster_dds_list[[cluster]] <- DESeqDataSetFromMatrix((gene_counts_all[expressed_genes,samplesheet_clusters$samples_cluster]+1), samplesheet_clusters[samplesheet_clusters$samples_cluster,], design =  ~ condition)
+  gene_cluster_dds_list[[cluster]]$condition <- relevel(gene_cluster_dds_list[[cluster]]$condition, "other")
+  gene_cluster_dds_list[[cluster]] <- DESeq(gene_cluster_dds_list[[cluster]])
+  gene_cluster_res_list[[cluster]] <- results(gene_cluster_dds_list[[cluster]], )
+  gene_cluster_res_list_df[[cluster]] <- as.data.frame(gene_cluster_res_list[[cluster]])
+  gene_cluster_res_list_df[[cluster]]$gene_id <- rownames(gene_cluster_res_list_df[[cluster]])
+  print(names(gene_cluster_res_list_df[[cluster]]))
+  openxlsx::write.xlsx(gene_cluster_res_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_microglia_subcluster_", cluster, "_cluster_DEA_snRNAseq_res.xlsx", sep=""))
+}
 
-
+colnames(gene_counts$PUT)
 ```
 
 ## Characterize PD effect per subcluster
 Differential expression analyses for PD vs Control pseudobulks for each region and subcluster pair. Save per-subcluster results (one excel with region per sheet).
 ```{r}
 library(openxlsx)
-
 gene_dds_list <- list()
 gene_exp_list <- list()
 gene_res_list <- list()
 gene_res_list_df <- list()
+
+samplesheet_list <- split(samplesheet, f = samplesheet$Region)
 
 for(cluster in as.character(0:8)){
   gene_dds_list[[cluster]] <- list()
@@ -163,18 +180,12 @@ for(cluster in as.character(0:8)){
   for(region in regions){
     print(cluster)
     print(region)
-    gene_counts <- list()
-    gene_counts[[region]] <- fread(paste("~/inbox/ASAP/truster_output_microglia/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
-    rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
-
-    samplesheet_list <- split(samplesheet, f = samplesheet$Region)
-
     rownames(samplesheet_list[[region]]) <- samplesheet_list[[region]]$Sample
     samples_cluster <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
     samples_cluster <- samples_cluster[which(samples_cluster %in% colnames(gene_counts[[region]]))]
     rownames(samplesheet_list[[region]]) <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
     rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
-    
+
     expressed_genes <- rownames(gene_counts[[region]])[which(rowSums(gene_counts[[region]][,samples_cluster]) > 0)]
     gene_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((gene_counts[[region]][expressed_genes,samples_cluster]+1), samplesheet_list[[region]][samples_cluster,], design =  ~ Dx)
     gene_dds_list[[cluster]][[region]]$Dx <- relevel(gene_dds_list[[cluster]][[region]]$Dx, "Ctl")
