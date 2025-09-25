@@ -1,0 +1,303 @@
+---
+title: "Cis-effect of upregulated TEs in PD microglia and MSN"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Cis-effects of TEs (HERVs and L1s) on gene expression across cell types (SN/PUT microglia, PUT MSN)
+This R Notebook performs a cis-effect analysis, linking upregulated TEs (specifically HERVs and L1 elements) to neighboring gene expression changes (log2 fold change) in various brain cell types. The goal is to assess whether proximity to upregulated TEs correlates with altered gene expression in Parkinson's Disease (PD) versus controls.
+
+### Input:
+- Gene annotation BED: gencode.v38.annotation_protein_coding_genes.bed
+- DEA results (genes, HERVs, L1s): Excel files with differential expression outputs for SN and PUT regions.
+- TE annotation BEDs: 
+* HERVs: hg38_HERVs_prediction_format.bed
+* L1s: hg38_rmsk_TEtranscripts_FL_L1HS_PA4.bed
+- Intersections: Precomputed TE–gene intersections at various distances (e.g., 500bp, 10kb, etc.) in .bed format (output from `bedtools_window_upreg_TEs_genes.sh`). *After chunk 4.*
+```{r}
+library(openxlsx)
+library(ggpubr)
+library(tidyverse)
+library(data.table)
+
+gene_bed <- fread("/Volumes/MyPassport/annotations/human/gencode/v38/gencode.v38.annotation_protein_coding_genes.bed", skip=1)
+colnames(gene_bed) <- c("chr", "start", "end", "gene_id", "dot", "strand")
+```
+
+## Gene differential expression analysis results 
+
+- Load results
+- Annotate promoter site using gene annotation
+- Write BED files of promoter regions for all genes we have log2FC (PD vs Ctl)
+```{r}
+sn_microglia <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_cluster_4_PD_DEA_snRNAseq_res.xlsx", sheet = "SN")
+put_microglia <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_cluster_4_PD_DEA_snRNAseq_res.xlsx", sheet = "PUT")
+put_msn <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_cluster_1_PD_DEA_snRNAseq_res.xlsx", sheet = "PUT")
+
+sn_microglia <- gene_bed %>% 
+  left_join(sn_microglia) %>% 
+  drop_na(baseMean)
+
+sn_microglia$promoter_start <- ifelse(sn_microglia$strand == "+", sn_microglia$start, sn_microglia$end - 1000)
+sn_microglia$promoter_end <- ifelse(sn_microglia$strand == "+", sn_microglia$start + 1000, sn_microglia$end)
+
+put_microglia <- gene_bed %>% 
+  left_join(put_microglia) %>% 
+  drop_na(baseMean)
+
+put_microglia$promoter_start <- ifelse(put_microglia$strand == "+", put_microglia$start, put_microglia$end - 1000)
+put_microglia$promoter_end <- ifelse(put_microglia$strand == "+", put_microglia$start + 1000, put_microglia$end)
+
+put_msn <- gene_bed %>% 
+  left_join(put_msn) %>% 
+  drop_na(baseMean)
+
+put_msn$promoter_start <- ifelse(put_msn$strand == "+", put_msn$start, put_msn$end - 1000)
+put_msn$promoter_end <- ifelse(put_msn$strand == "+", put_msn$start + 1000, put_msn$end)
+
+sn_microglia$start <- str_remove_all(format(sn_microglia$start, scientific = F), " ")
+sn_microglia$end <- str_remove_all(format(sn_microglia$end, scientific = F), " ")
+put_msn$start <- str_remove_all(format(put_msn$start, scientific = F), " ")
+put_msn$end <- str_remove_all(format(put_msn$end, scientific = F), " ")
+put_microglia$start <- str_remove_all(format(put_microglia$start, scientific = F), " ")
+put_microglia$end <- str_remove_all(format(put_microglia$end, scientific = F), " ")
+
+write.table(sn_microglia[,c("chr", "start", "end", "gene_id", "dot", "strand", "log2FoldChange")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/gene_cluster_4_DEA_snRNAseq_res_SN.bed", sep="\t", quote = F, col.names = F, row.names = F)
+write.table(put_microglia[,c("chr", "start", "end", "gene_id", "dot", "strand", "log2FoldChange")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/gene_cluster_4_DEA_snRNAseq_res_PUT.bed", sep="\t", quote = F, col.names = F, row.names = F)
+write.table(put_msn[,c("chr", "start", "end", "gene_id", "dot", "strand", "log2FoldChange")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/gene_cluster_1_DEA_snRNAseq_res_PUT.bed", sep="\t", quote = F, col.names = F, row.names = F)
+```
+
+
+## HERV differential expression analysis results 
+
+- Load results
+- Subset significantly upregulated HERVs 
+- Write BED files of upregulated HERVs (PD vs Ctl)
+```{r}
+herv_bed <- fread("/Volumes/MyPassport/annotations/human/retrotector/hg38_HERVs_prediction_format.bed", skip=1)
+colnames(herv_bed) <- c("chr", "start", "end", "HERV_id", "dot", "strand")
+
+herv_path_file <- "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/HERV_PDvsCtl_res.xlsx"
+sn_microglia <- openxlsx::read.xlsx(herv_path_file, sheet = "SN_4")
+put_microglia <- openxlsx::read.xlsx(herv_path_file, sheet = "PUT_4")
+put_msn <- openxlsx::read.xlsx(herv_path_file, sheet = "PUT_1")
+
+sn_microglia <- herv_bed %>% 
+  left_join(sn_microglia) %>% 
+  drop_na(baseMean) %>% 
+  filter(padj < 0.05 & log2FoldChange > 1)
+
+put_microglia <- herv_bed %>% 
+  left_join(put_microglia) %>% 
+  drop_na(baseMean) %>% 
+  filter(padj < 0.05 & log2FoldChange > 1)
+
+put_msn <- herv_bed %>% 
+  left_join(put_msn) %>% 
+  drop_na(baseMean) %>% 
+  filter(padj < 0.05 & log2FoldChange > 1)
+
+sn_microglia$start <- str_remove_all(format(sn_microglia$start, scientific = F), " ")
+sn_microglia$end <- str_remove_all(format(sn_microglia$end, scientific = F), " ")
+put_msn$start <- str_remove_all(format(put_msn$start, scientific = F), " ")
+put_msn$end <- str_remove_all(format(put_msn$end, scientific = F), " ")
+put_microglia$start <- str_remove_all(format(put_microglia$start, scientific = F), " ")
+put_microglia$end <- str_remove_all(format(put_microglia$end, scientific = F), " ")
+
+write.table(sn_microglia[,c("chr", "start", "end", "HERV_id", "dot", "strand")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/HERVs_cluster_4_DEA_snRNAseq_SN_upreg.bed", sep="\t", quote = F, col.names = F, row.names = F)
+write.table(put_microglia[,c("chr", "start", "end", "HERV_id", "dot", "strand")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/HERVs_cluster_4_DEA_snRNAseq_PUT_upreg.bed", sep="\t", quote = F, col.names = F, row.names = F)
+write.table(put_msn[,c("chr", "start", "end", "HERV_id", "dot", "strand")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/HERVs_cluster_1_DEA_snRNAseq_PUT_upreg.bed", sep="\t", quote = F, col.names = F, row.names = F)
+```
+
+## L1 differential expression analysis results 
+
+- Load results
+- Subset significantly upregulated L1s 
+- Write BED files of upregulated L1s (PD vs Ctl)
+```{r}
+l1_bed <- fread("/Volumes/MyPassport/annotations/human/repeatmasker/hg38_rmsk_TEtranscripts_FL_L1HS_PA4.bed", skip=1)
+colnames(l1_bed) <- c("chr", "start", "end", "L1s_id", "dot", "strand", "TE_info")
+
+l1_path_file <- "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/L1s_PDvsCtl_res.xlsx"
+sn_microglia <- openxlsx::read.xlsx(l1_path_file, sheet = "SN_4")
+put_microglia <- openxlsx::read.xlsx(l1_path_file, sheet = "PUT_4")
+put_msn <- openxlsx::read.xlsx(l1_path_file, sheet = "PUT_1")
+
+sn_microglia <- l1_bed %>% 
+  left_join(sn_microglia) %>% 
+  drop_na(baseMean) %>% 
+  filter(padj < 0.05 & log2FoldChange > 1)
+
+put_microglia <- l1_bed %>% 
+  left_join(put_microglia) %>% 
+  drop_na(baseMean) %>% 
+  filter(padj < 0.05 & log2FoldChange > 1)
+
+sn_microglia$start <- str_remove_all(format(sn_microglia$start, scientific = F), " ")
+sn_microglia$end <- str_remove_all(format(sn_microglia$end, scientific = F), " ")
+put_msn$start <- str_remove_all(format(put_msn$start, scientific = F), " ")
+put_msn$end <- str_remove_all(format(put_msn$end, scientific = F), " ")
+put_microglia$start <- str_remove_all(format(put_microglia$start, scientific = F), " ")
+put_microglia$end <- str_remove_all(format(put_microglia$end, scientific = F), " ")
+
+write.table(sn_microglia[,c("chr", "start", "end", "L1s_id", "dot", "strand")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/l1s_cluster_4_DEA_snRNAseq_SN_upreg.bed", sep="\t", quote = F, col.names = F, row.names = F)
+write.table(put_microglia[,c("chr", "start", "end", "L1s_id", "dot", "strand")], "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/input/l1s_cluster_4_DEA_snRNAseq_PUT_upreg.bed", sep="\t", quote = F, col.names = F, row.names = F)
+```
+
+## Bedtools window intersects
+
+At this point I performed intersections using bedtools windows using `./bedtools_window_upreg_TEs_genes.sh`. And *then* continue here to plot the results.
+
+## Cis-effect plotting function
+
+Plot gene log2FC based on proximity to HERVs: this function generates a boxplot + jitter plot visualizing gene expression changes (log2foldChanges) for genes whose promoters are located at increasing distances from a set of TEs (in this case upregulated HERVs). 
+
+To do so, it:
+- Removes gene duplicates across distance windows (each gene counted only once at the closest window).
+- Filters TEs by a given prefix (optional).
+
+```{r}
+cis_plot <- function(df_list, title, prefix = NA) {
+  # Ensure the input list is named with distances as character strings
+  if (is.null(names(df_list))) {
+    stop("Please provide a named list of dataframes, with names as distance labels (e.g., '500', '10000').")
+  }
+
+  df_list <- df_list[lapply(df_list, nrow) > 0]
+  # Optional prefix filtering
+  if (!is.na(prefix)) {
+    df_list <- lapply(df_list, function(df) {
+      df %>% filter(startsWith(V11, prefix))
+    })
+  }
+
+  # Progressive gene filtering to remove overlaps
+  filtered_list <- list()
+  seen_genes <- character()
+
+  for (name in names(df_list)) {
+    df <- df_list[[name]]
+    df <- df %>% filter(!V10 %in% seen_genes)
+    seen_genes <- union(seen_genes, df$V10)
+    
+    if(nrow(df) > 0){
+      # Rename columns consistently
+      colnames(df) <- c("TE_chr", "TE_start", "TE_end", 
+                        "TE_id", "dot1", "TE_strand",
+                        "chr", "start", "end", "gene", "dot", "strand",
+                        "gene_log2FC")
+      df$window <- name  
+      filtered_list[[name]] <- df
+    }
+  }
+
+  # Combine all
+  intersect_genes <- bind_rows(filtered_list)
+  if(nrow(intersect_genes) > 0){
+    # Create group labels with counts
+    intersect_genes <- intersect_genes %>%
+      group_by(window) %>%
+      mutate(group_n = paste0(window, "\n(", n(), ")"))
+    
+    # Set factor levels in order of window size
+    ordered_windows <- names(df_list)[names(df_list) %in% intersect_genes$window]
+    levels_names <- intersect_genes %>%
+      distinct(window, group_n) %>%
+      arrange(as.numeric(window)) %>%
+      pull(group_n)
+    
+    intersect_genes$group_n <- factor(intersect_genes$group_n, levels = levels_names)
+    
+    # Mean points
+    mean_df <- intersect_genes %>%
+      group_by(group_n) %>%
+      summarize(mean_log2FC = mean(gene_log2FC), .groups = "drop")
+    
+    # Plot
+    p <- ggplot(intersect_genes, aes(x = group_n, y = gene_log2FC)) +
+      geom_jitter(width = 0.2, size = 0.4, color="grey") +
+      geom_boxplot(alpha = 0.5, width = 0.2, outlier.shape = NA) +
+      stat_compare_means(method = "anova") +
+      geom_hline(yintercept = 0, linetype="dashed", color="grey") +
+      geom_line(data = mean_df, aes(x = group_n, y = mean_log2FC, group = 1), 
+                color = "red", linetype = "dashed", inherit.aes = FALSE) +
+      geom_point(data = mean_df, aes(x = group_n, y = mean_log2FC), 
+                 color = "red", inherit.aes = FALSE) +
+      ggtitle(title) + 
+      theme_bw() +
+      labs(x = "Distance to gene", y = "Gene's log2FC")
+    
+    return(p)
+  }else{
+    return(NA)
+  }
+}
+```
+
+## Cis-effect of upregulated HERVs in SN microglia
+```{r}
+path_results <- "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/ciseffect/results/"
+# HERVs
+# Microglia SN
+HERVs_cluster_4_SN_upreg_intersect_500bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_SN_upreg_intersect_500bps_genes.bed"))
+HERVs_cluster_4_SN_upreg_intersect_10000bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_SN_upreg_intersect_10000bps_genes.bed"))
+HERVs_cluster_4_SN_upreg_intersect_100000bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_SN_upreg_intersect_100000bps_genes.bed"))
+HERVs_cluster_4_SN_upreg_intersect_250000bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_SN_upreg_intersect_250000bps_genes.bed"))
+# L1s
+# Microglia SN
+l1s_cluster_4_SN_upreg_intersect_500bps_genes <- fread(paste0(path_results, "l1s_cluster_4_SN_upreg_intersect_500bps_genes.bed"))
+l1s_cluster_4_SN_upreg_intersect_10000bps_genes <- fread(paste0(path_results, "l1s_cluster_4_SN_upreg_intersect_10000bps_genes.bed"))
+l1s_cluster_4_SN_upreg_intersect_100000bps_genes <- fread(paste0(path_results, "l1s_cluster_4_SN_upreg_intersect_100000bps_genes.bed"))
+l1s_cluster_4_SN_upreg_intersect_250000bps_genes <- fread(paste0(path_results, "l1s_cluster_4_SN_upreg_intersect_250000bps_genes.bed"))
+
+cis_plot(df_list = list("500" = rbind(HERVs_cluster_4_SN_upreg_intersect_500bps_genes,
+                                     l1s_cluster_4_SN_upreg_intersect_500bps_genes), 
+                  "10000" = rbind(HERVs_cluster_4_SN_upreg_intersect_10000bps_genes,
+                                  l1s_cluster_4_SN_upreg_intersect_10000bps_genes),
+                  "100000" = rbind(HERVs_cluster_4_SN_upreg_intersect_100000bps_genes,
+                                   l1s_cluster_4_SN_upreg_intersect_100000bps_genes),
+                  "250000" = rbind(HERVs_cluster_4_SN_upreg_intersect_250000bps_genes,
+                                   l1s_cluster_4_SN_upreg_intersect_250000bps_genes)),
+                  title = "Upregulated TEs SN Microglia")
+```
+
+## Cis-effect of upregulated HERVs in PUT microglia
+```{r}
+# Microglia PUT
+HERVs_cluster_4_PUT_upreg_intersect_500bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_PUT_upreg_intersect_500bps_genes.bed"))
+HERVs_cluster_4_PUT_upreg_intersect_10000bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_PUT_upreg_intersect_10000bps_genes.bed"))
+HERVs_cluster_4_PUT_upreg_intersect_100000bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_PUT_upreg_intersect_100000bps_genes.bed"))
+HERVs_cluster_4_PUT_upreg_intersect_250000bps_genes <- fread(paste0(path_results, "HERVs_cluster_4_PUT_upreg_intersect_250000bps_genes.bed"))
+
+l1s_cluster_4_PUT_upreg_intersect_500bps_genes <- fread(paste0(path_results, "l1s_cluster_4_PUT_upreg_intersect_500bps_genes.bed"))
+l1s_cluster_4_PUT_upreg_intersect_10000bps_genes <- fread(paste0(path_results, "l1s_cluster_4_PUT_upreg_intersect_10000bps_genes.bed"))
+l1s_cluster_4_PUT_upreg_intersect_100000bps_genes <- fread(paste0(path_results, "l1s_cluster_4_PUT_upreg_intersect_100000bps_genes.bed"))
+l1s_cluster_4_PUT_upreg_intersect_250000bps_genes <- fread(paste0(path_results, "l1s_cluster_4_PUT_upreg_intersect_250000bps_genes.bed"))
+
+cis_plot(list("500" = rbind(HERVs_cluster_4_PUT_upreg_intersect_500bps_genes,
+                                     l1s_cluster_4_PUT_upreg_intersect_500bps_genes), 
+                  "10000" = rbind(HERVs_cluster_4_PUT_upreg_intersect_10000bps_genes,
+                                  l1s_cluster_4_PUT_upreg_intersect_10000bps_genes),
+                  "100000" = rbind(HERVs_cluster_4_PUT_upreg_intersect_100000bps_genes,
+                                  l1s_cluster_4_PUT_upreg_intersect_100000bps_genes),
+                  "250000" = rbind(HERVs_cluster_4_PUT_upreg_intersect_250000bps_genes,
+                                   l1s_cluster_4_PUT_upreg_intersect_250000bps_genes)),
+                  title = "Upregulated TEs PUT Microglia")
+```
+
+## Cis-effect of upregulated HERVs in PUT MSN (cluster 1)
+```{r}
+# MSN PUT
+HERVs_cluster_1_PUT_upreg_intersect_500bps_genes <- fread(paste0(path_results, "HERVs_cluster_1_PUT_upreg_intersect_500bps_genes.bed"))
+HERVs_cluster_1_PUT_upreg_intersect_10000bps_genes <- fread(paste0(path_results, "HERVs_cluster_1_PUT_upreg_intersect_10000bps_genes.bed"))
+HERVs_cluster_1_PUT_upreg_intersect_100000bps_genes <- fread(paste0(path_results, "HERVs_cluster_1_PUT_upreg_intersect_100000bps_genes.bed"))
+HERVs_cluster_1_PUT_upreg_intersect_250000bps_genes <- fread(paste0(path_results, "HERVs_cluster_1_PUT_upreg_intersect_250000bps_genes.bed"))
+
+cis_plot(list("500" = HERVs_cluster_1_PUT_upreg_intersect_500bps_genes, 
+                  "10000" = HERVs_cluster_1_PUT_upreg_intersect_10000bps_genes,
+                  "100000" = HERVs_cluster_1_PUT_upreg_intersect_100000bps_genes,
+                  "250000" = HERVs_cluster_1_PUT_upreg_intersect_250000bps_genes),
+                  title = "Upregulated HERVs PUT MSN")
+```
