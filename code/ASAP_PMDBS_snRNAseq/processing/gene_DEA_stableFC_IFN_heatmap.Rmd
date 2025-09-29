@@ -1,0 +1,53 @@
+---
+title: "Visualization stable fold changes of IFN-related genes"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+### This markdown produces supplemental figure 5A, to validate the region-specific (SN and PUT) IFN response.  
+
+- Load needed libraries
+- Load relevant clean data
+- Load the heatmap in main figure to extract the gene names to visualize
+- Plot heatmap in correct color scale
+
+```{r}
+library(tidyverse)
+library(data.table)
+library(ggplot2)
+library(pheatmap)
+
+sn <- fread("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_DEA_pernuclei/asap_dea_PD_SN_wosexchrs_4.csv", data.table=F)
+put <- fread("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_DEA_pernuclei/asap_dea_PD_PUT_wosexchrs_4.csv", data.table=F)
+pfc <- fread("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_DEA_pernuclei/asap_dea_PD_PFC_wosexchrs_4.csv", data.table=F)
+amy <- fread("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_DEA_pernuclei/asap_dea_PD_AMY_wosexchrs_4.csv", data.table=F)
+
+microglia_ifn_genes_heatmap <- fread(paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/heatmap_matrix_SN_PUT_PFC_AMY_IFN_related_genes_microglia_log2FC.tab", sep=","), data.table = F)
+microglia_ifn_genes <- microglia_ifn_genes_heatmap$gene_id
+
+rownames(sn) <- sn$genes
+rownames(put) <- put$genes
+rownames(pfc) <- pfc$genes
+rownames(amy) <- amy$genes
+
+tmp_heatmap_log2FC <- cbind(sn[microglia_ifn_genes,"stable_logfoldchange", drop=F],
+                            put[microglia_ifn_genes,"stable_logfoldchange", drop=F],
+                            pfc[microglia_ifn_genes,"stable_logfoldchange", drop=F],
+                            amy[microglia_ifn_genes,"stable_logfoldchange", drop=F])
+
+colnames(tmp_heatmap_log2FC) <- c("sn", "put", "pfc", "amy")
+
+bk_neg <- seq(-0.1,0, length.out=50)
+bk_pos <- seq(0,0.1, length.out=50)
+bk <- c(bk_neg, bk_pos)
+bk <- unique(bk)
+color_pos <- colorRampPalette(c("white", "red"))(50)
+color_neg <- colorRampPalette(c("blue", "white"))(50)
+tmp_heatmap_log2FC[is.na(tmp_heatmap_log2FC)] <- 0
+
+pheatmap::pheatmap(tmp_heatmap_log2FC, breaks = bk, color = c(color_neg, color_pos), cluster_cols = F, main = "Core enrichment of enriched IFN-related\nGO terms in SN microglia", show_rownames = T, border_color = F)
+```
+
+
