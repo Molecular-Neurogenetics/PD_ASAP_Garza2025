@@ -1,0 +1,166 @@
+---
+title: "ASAP deep bulk RNAseq: Expressed FL L1HS-PA3"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+In this notebook we define the >6kbp L1HS-PA3 elements that are expressed in our postmortem cohort of PD and control individuals. 
+
+## Load libraries and count matrices
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+library(pheatmap)
+library(openxlsx)
+library(RColorBrewer)
+library(tidyverse)
+library(stringr)
+library(DESeq2)
+library(UpSetR)
+library(grDevices)
+library(VennDiagram)
+samplesheet <- read.table("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/samplesheet.tab", header = T)
+
+regions <- c("AMY", "PUT", "PFC", "SN")
+path <- "~/inbox/ASAP_bulk/te_counts"
+files <- list.files(path, full.names = T)
+files <- files[which(endsWith(files, "txt"))]
+
+sizeFactors <- read.table("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/sizefactors_gene.tab", header = T)
+rownames(sizeFactors) <- sizeFactors$cluster
+
+for(i in 1:length(files)){
+  f <- files[i]
+  if(i == 1){
+    te_counts <- fread(f, data.table = F)
+    colnames(te_counts)[7] <- sapply(str_split(colnames(te_counts)[7], "Aligned.sortedByCoord.out.bam"), head, 1)
+    rownames(te_counts) <- te_counts$Geneid
+  }else{
+    tmp <- fread(f, data.table = F)
+    colnames(tmp)[7] <- sapply(str_split(colnames(tmp)[7], "Aligned.sortedByCoord.out.bam"), head, 1)
+    if(all(te_counts$Geneid == tmp$Geneid)){
+      te_counts <- cbind(te_counts, tmp[,7, drop=F])
+    }else{
+      te_counts <- merge(te_counts, tmp, by="Geneid")
+    }
+    rownames(te_counts) <- te_counts$Geneid
+  }
+}
+
+head(te_counts)
+head(sizeFactors)
+```
+
+## Narrow down families and length to be used 
+
+`hg38_rmsk_TEtranscripts_FL_L1_marked_classification.tab` only contains elements over 6kbp in length. 
+```{r}
+l1s_annotation <- fread("/Volumes/MyPassport/ASAP/data/annotations/hg38_rmsk_TEtranscripts_FL_L1_marked_classification.tab", data.table = F, skip=1, header = F)
+fl_l1s_annotation <- l1s_annotation[which(l1s_annotation$V3 == "FL_L1"),]
+fl_l1s_annotation <- fl_l1s_annotation[which(fl_l1s_annotation$V2 %in% c("L1HS", "L1PA2", "L1PA3")),]
+head(fl_l1s_annotation)
+```
+
+## Normalize counts using gene size factors
+
+And remove a couple of outlier samples (see first heatmap)
+```{r}
+# Extract only those from our counts so we dont have to use the large dataframe
+l1pa_counts <- te_counts[fl_l1s_annotation$V1,]
+
+l1pa_counts_norm <- l1pa_counts[,samplesheet$sample]
+l1pa_counts_norm[] <- mapply('/', l1pa_counts_norm[,samplesheet$sample], sizeFactors[samplesheet$sample,"sizeFactor"])
+rownames(samplesheet) <- samplesheet$sample
+pheatmap(log2(l1pa_counts_norm[,samplesheet$sample] + 1), show_rownames = F, annotation_col = samplesheet[,c("region", "dx", "age")])
+
+# Remove sample outliers
+samplesheet_wo_outliers <- samplesheet[which(samplesheet$sample != "ASAP226_PD_NP16-285_PFC_bulk" & samplesheet$sample != "ASAP210_PD_NP19-91_SN_bulk"),]
+pheatmap(log2(l1pa_counts_norm[,samplesheet_wo_outliers$sample] + 1), show_rownames = F, annotation_col = samplesheet_wo_outliers[,c("region", "dx", "age")])
+
+```
+
+## Heatmap visualization of expressed >6kbp L1HS-PA3
+
+- Identify elements expressed in at least 3 samples per group (Group: dx + region)
+- Heatmap visualization and export table
+
+```{r}
+# write.table(l1pa_counts_norm, "/Volumes/MyPassport/ASAP_bulk/FTE_Unique/fl_l1hs_pa3_counts_norm.csv", quote = F, sep = ",", row.names = T, col.names = T)
+samplesheet_wo_outliers <- samplesheet_wo_outliers %>% 
+  group_by(region, dx) %>% 
+  mutate(total_num_samples_group = n()) %>% # Add number of samples per region and condition in a new column
+  as.data.frame() 
+rownames(samplesheet_wo_outliers) <- samplesheet_wo_outliers$sample
+
+keep_FL_L1PAs <- l1pa_counts_norm %>% # From the normalized counts of >6kbp L1HS-PA3
+  rownames_to_column() %>% 
+  reshape2::melt() %>% 
+  merge(samplesheet_wo_outliers, by.x="variable", by.y="sample") %>% # Merge with samplesheet to get the total number of samples in group
+  group_by(rowname, region, dx, total_num_samples_group) %>% # Per group (without dropping the total num of samples in group)
+  summarise(num_samples = sum(value > 10)) %>% # Tell me how many samples have a value of >10. One line per FL_L1PA, and group (region + dx), 18600
+  mutate(keep = num_samples >= total_num_samples_group/3) %>% # At least a third of the samples expressing it
+  as.data.frame()
+
+keep_FL_L1PAs
+
+l1pa_counts_norm_expressed <- l1pa_counts_norm[unique(keep_FL_L1PAs[which(keep_FL_L1PAs$keep),"rowname"]),] # 520 FL_L1PAs expressed in at least a third of the samples in a group
+
+samplesheet_wo_outliers <- samplesheet_wo_outliers[order(samplesheet_wo_outliers$region, samplesheet_wo_outliers$dx),]
+l1pa_counts_norm_expressed <- l1pa_counts_norm_expressed[,samplesheet_wo_outliers$sample]
+l1pa_counts_norm_expressed$mean_PD <- rowMeans(l1pa_counts_norm_expressed[,samplesheet_wo_outliers$dx == "PD"])
+l1pa_counts_norm_expressed$mean_ctrl <- rowMeans(l1pa_counts_norm_expressed[,samplesheet_wo_outliers$dx == "Ctl"])
+
+quantile(l1pa_counts_norm_expressed$mean_PD)
+
+getPalette = colorRampPalette(brewer.pal(9, "BuPu"))
+col.pal <- getPalette(60)
+tmp <- pheatmap(log2(l1pa_counts_norm_expressed[,samplesheet_wo_outliers$sample] + 1), cluster_cols = F, show_rownames = T, fontsize = 5, annotation_col = samplesheet_wo_outliers[,c("region", "dx", "age"),drop=F], color = col.pal)
+
+# Write to file ordered as in figure
+l1pa_counts_norm_expressed_tmp <- merge(te_counts[,c("Geneid", "Chr", "Start", "End", "Strand", "Length")], l1pa_counts_norm_expressed[tmp$tree_row$labels[tmp$tree_row$order],samplesheet_wo_outliers$sample], by.x="Geneid", by.y="row.names")
+
+# write.table(l1pa_counts_norm_expressed_tmp, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/heatmap_FL_L1PAs_expressed.tab",sep = ",",  quote = F, col.names = T, row.names = F)
+```
+
+# Box plots with expressed / not expressed elements
+
+Assess the difference between these two categories of elements (< 10 norm counts in a 1/3 of the group)
+
+```{r}
+l1pa_counts_norm[,samplesheet_wo_outliers$sample] %>%
+  rownames_to_column("TE_id") %>% 
+  mutate(expressed = ifelse(TE_id %in% rownames(l1pa_counts_norm_expressed), "Expressed", "Not expressed")) %>% 
+reshape2::melt() %>%
+  merge(samplesheet_wo_outliers, by.x="variable", by.y="sample") %>%
+  group_by(variable, expressed) %>% 
+  summarise("mean" = mean(value)) %>% 
+  ggplot(aes(x=expressed, y=log2(mean+1))) + 
+  geom_jitter(height = 0, width = 0.2, color="lightgrey") +
+  geom_violin(alpha=0.5) +
+  labs(y="log2(Mean Normalized Expression)") + 
+  geom_boxplot(width = 0.2, outliers = F, fill=NA) + theme_bw() + ggtitle(">6kbp L1HS-PA3 Expression") + stat_compare_means(method = "t.test") + ylim(c(0,6.5))
+```
+
+## Write to files names of expressed L1s 
+```{r}
+write.table(rownames(l1pa_counts_norm_expressed), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed.tab", quote = F, row.names = F, col.names = F)
+
+write.table(names(sort(rowSums(l1pa_counts_norm_expressed[, colnames(l1pa_counts_norm_expressed)[grepl("PFC", colnames(l1pa_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PFC.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(l1pa_counts_norm_expressed[, colnames(l1pa_counts_norm_expressed)[grepl("AMY", colnames(l1pa_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_AMY.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(l1pa_counts_norm_expressed[, colnames(l1pa_counts_norm_expressed)[grepl("PUT", colnames(l1pa_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_PUT.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(l1pa_counts_norm_expressed[, colnames(l1pa_counts_norm_expressed)[grepl("SN", colnames(l1pa_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed_sorted_mean_expression_SN.tab", quote = F, row.names = F, col.names = F)
+write.table(names(which(sort(rowSums(l1pa_counts_norm[,samplesheet_wo_outliers$sample])) == 0)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/not_expressed_FL_L1HS_L1PA3.tab", quote = F, row.names = F, col.names = F)
+```
+
+## How many are shared between regions? How many are region specific?
+
+```{r}
+keep_FL_L1PAs$group <- paste(keep_FL_L1PAs$region, keep_FL_L1PAs$dx, sep="_")
+
+upset(fromList(split(keep_FL_L1PAs[which(keep_FL_L1PAs$keep),"rowname"], f = keep_FL_L1PAs[which(keep_FL_L1PAs$keep),"region"])), nsets = 100, nintersects = 100)
+```
+

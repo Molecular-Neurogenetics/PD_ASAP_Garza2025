@@ -1,0 +1,153 @@
+---
+title: "ASAP deep bulk RNAseq: Expressed ERVs"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+In this notebook we define the ERV predictions (retrotector) that are expressed in our postmortem cohort of PD and control individuals. 
+
+## Load libraries and count matrices
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+library(pheatmap)
+library(openxlsx)
+library(RColorBrewer)
+library(tidyverse)
+library(stringr)
+library(DESeq2)
+library(UpSetR)
+library(grDevices)
+library(VennDiagram)
+samplesheet <- read.table("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/samplesheet.tab", header = T)
+
+regions <- c("AMY", "PUT", "PFC", "SN")
+path <- "/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/original/FHERVs_Unique"
+files <- list.files(path, full.names = T)
+files <- files[which(endsWith(files, "txt"))]
+
+sizeFactors <- read.table("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/sizefactors_gene.tab", header = T)
+rownames(sizeFactors) <- sizeFactors$cluster
+
+for(i in 1:length(files)){
+  f <- files[i]
+  if(i == 1){
+    te_counts <- fread(f, data.table = F)
+    colnames(te_counts)[7] <- sapply(str_split(colnames(te_counts)[7], "Aligned.sortedByCoord.out.bam"), head, 1)
+    rownames(te_counts) <- te_counts$Geneid
+  }else{
+    tmp <- fread(f, data.table = F)
+    colnames(tmp)[7] <- sapply(str_split(colnames(tmp)[7], "Aligned.sortedByCoord.out.bam"), head, 1)
+    if(all(te_counts$Geneid == tmp$Geneid)){
+      te_counts <- cbind(te_counts, tmp[,7, drop=F])
+    }else{
+      te_counts <- merge(te_counts, tmp, by="Geneid")
+    }
+    rownames(te_counts) <- te_counts$Geneid
+  }
+}
+
+head(te_counts)
+head(sizeFactors)
+```
+
+## Normalize counts using gene size factors
+
+And remove a couple of outlier samples (see first heatmap)
+```{r}
+te_counts_norm <- te_counts[,samplesheet$sample]
+te_counts_norm[] <- mapply('/', te_counts_norm[,samplesheet$sample], sizeFactors[samplesheet$sample,"sizeFactor"])
+rownames(samplesheet) <- samplesheet$sample
+samplesheet_wo_outliers <- samplesheet[which(samplesheet$sample != "ASAP226_PD_NP16-285_PFC_bulk" & samplesheet$sample != "ASAP210_PD_NP19-91_SN_bulk"),]
+
+pheatmap(log2(te_counts_norm[,samplesheet$sample] + 1), show_rownames = F, annotation_col = samplesheet[,c("region", "dx", "age")])
+pheatmap(log2(te_counts_norm[,samplesheet_wo_outliers$sample] + 1), show_rownames = F, annotation_col = samplesheet_wo_outliers[,c("region", "dx", "age")])
+
+reshape2::melt(te_counts_norm[,samplesheet_wo_outliers$sample]) %>%
+  merge(samplesheet_wo_outliers, by.x="variable", by.y="sample") %>% 
+  filter(dx == "Ctl") %>% 
+  ggplot(aes(x=1, y=log2(value+1))) + geom_violin() + geom_boxplot(width = 0.2, outliers = F) + 
+  theme_bw() + ggtitle("ERV Expression") + labs(y="log2(Normalized Expression)")
+```
+
+## Heatmap visualization of expressed ERVs
+
+- Identify elements expressed in at least 3 samples per group (Group: dx + region)
+- Heatmap visualization and export table
+```{r}
+# write.table(te_counts_norm, "/Volumes/MyPassport/ASAP_bulk/FHERVs_Unique/herv_counts_norm.csv", quote = F, sep = ",", row.names = T, col.names = T)
+samplesheet_wo_outliers <- samplesheet_wo_outliers %>% 
+  group_by(region, dx) %>% 
+  mutate(total_num_samples_group = n()) %>% # Add number of samples per region and condition in a new column
+  as.data.frame() 
+rownames(samplesheet_wo_outliers) <- samplesheet_wo_outliers$sample
+
+keep_HERVs <- te_counts_norm %>% 
+  rownames_to_column() %>% 
+  reshape2::melt() %>% 
+  merge(samplesheet_wo_outliers, by.x="variable", by.y="sample") %>% # Merge with samplesheet to get the total number of samples in group
+  group_by(rowname, region, dx, total_num_samples_group) %>% # Per group (without dropping the total num of samples in group)
+  summarise(num_samples = sum(value > 10)) %>% # Tell me how many samples have a value of >10. One line per ERV, and group (region + dx), 18600
+  mutate(keep = num_samples >= total_num_samples_group/3) %>% # At least a third of the samples expressing it
+  as.data.frame()
+
+te_counts_norm_expressed <- te_counts_norm[unique(keep_HERVs[which(keep_HERVs$keep),"rowname"]),] # 739 HERVs expressed in at least a third of the samples in a group
+nrow(te_counts_norm_expressed)
+
+samplesheet_wo_outliers <- samplesheet_wo_outliers[order(samplesheet_wo_outliers$region, samplesheet_wo_outliers$dx, names(colSums(te_counts_norm_expressed[,samplesheet_wo_outliers$sample]))[match(names(colSums(te_counts_norm_expressed[,samplesheet_wo_outliers$sample])), samplesheet_wo_outliers$sample )]),]
+te_counts_norm_expressed <- te_counts_norm_expressed[,samplesheet_wo_outliers$sample]
+te_counts_norm_expressed$mean_PD <- rowMeans(te_counts_norm_expressed[,samplesheet_wo_outliers$dx == "PD"])
+te_counts_norm_expressed$mean_ctrl <- rowMeans(te_counts_norm_expressed[,samplesheet_wo_outliers$dx == "Ctl"])
+
+quantile(te_counts_norm_expressed$mean_PD)
+
+getPalette = colorRampPalette(brewer.pal(9, "BuPu"))
+col.pal <- getPalette(60)
+
+tmp <- pheatmap(log2(te_counts_norm_expressed[,samplesheet_wo_outliers$sample] + 1), cluster_cols = F, show_rownames = F, fontsize = 5, annotation_col = samplesheet_wo_outliers[,c("region", "dx", "age"),drop=F], color = col.pal)
+# Write to file ordered as in figure
+te_counts_norm_expressed_tmp <- merge(te_counts[,c("Geneid", "Chr", "Start", "End", "Strand", "Length")], te_counts_norm_expressed[tmp$tree_row$labels[tmp$tree_row$order],samplesheet_wo_outliers$sample], by.x="Geneid", by.y="row.names")
+
+write.table(te_counts_norm_expressed_tmp, "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/heatmap_ERVs_expressed.tab",sep = ",",  quote = F, col.names = T, row.names = F)
+```
+
+# Box plots with expressed / not expressed elements
+
+Assess the difference between these two categories of elements (< 10 norm counts in a 1/3 of the group)
+
+```{r}
+te_counts_norm[,samplesheet_wo_outliers$sample] %>%
+  rownames_to_column("TE_id") %>% 
+  mutate(expressed = ifelse(TE_id %in% rownames(te_counts_norm_expressed), "Expressed", "Not expressed")) %>% 
+reshape2::melt() %>%
+  merge(samplesheet_wo_outliers, by.x="variable", by.y="sample") %>%
+  group_by(variable, expressed) %>% 
+  summarise("mean" = mean(value)) %>% 
+  ggplot(aes(x=expressed, y=log2(mean+1))) + 
+  geom_jitter(height = 0, width = 0.2, color="lightgrey") +
+  geom_violin(alpha=0.5) +
+  labs(y="log2(Mean Normalized Expression)") + 
+  geom_boxplot(width = 0.2, outliers = F, fill=NA) + theme_bw() + ggtitle("ERV Expression") + stat_compare_means(method = "t.test") + ylim(c(0, 12))
+```
+
+## Write to files names/IDs of expressed ERVs
+```{r}
+write.table(rownames(te_counts_norm_expressed), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("PFC", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PFC.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("AMY", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_AMY.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("PUT", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PUT.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("SN", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_SN.tab", quote = F, row.names = F, col.names = F)
+write.table(names(which(sort(rowSums(te_counts_norm[,samplesheet_wo_outliers$sample])) == 0)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/not_expressed_fl_hervs.tab", quote = F, row.names = F, col.names = F)
+```
+
+## How many are shared between regions? How many are region specific?
+
+```{r}
+keep_HERVs$group <- paste(keep_HERVs$region, keep_HERVs$dx, sep="_")
+upset(fromList(split(keep_HERVs[which(keep_HERVs$keep),"rowname"], f = keep_HERVs[which(keep_HERVs$keep),"region"])), nsets = 100, nintersects = 100)
+```
+
