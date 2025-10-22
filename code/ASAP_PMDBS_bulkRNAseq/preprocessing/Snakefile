@@ -1,0 +1,81 @@
+# -*- coding: utf-8 -*-
+
+# lunarc configuration file
+# configuration file with sample list (yaml list)
+
+import os
+
+WD =  "/scale/gr01/shared/jjakobsson/processed/ASAP/"
+configfile: "/scale/gr01/shared/jjakobsson/processed/ASAP/src/config_files/config.yaml"
+
+SAMPLES = config["samples"]
+
+geneGTF = "/scale/gr01/shared/jjakobsson/backup/raquelgg_fs3_jakobssonlab/annotations/hg38/gencode/v38/gencode.v38.annotation.gtf"
+starIndex = "/scale/gr01/shared/jjakobsson/backup/raquelgg_fs5_jakobssonlab/GRCh38.p13_gencode.v38_STAR"
+
+# Run as:
+# ml GCC/12.2.0  OpenMPI/4.1.4 snakemake/7.32.3
+# snakemake -j 5 --cluster-config /scale/gr01/shared/jjakobsson/processed/ASAP/src/config_files/lunarc_config.json --cluster "sbatch -A {cluster.account} -p {cluster.partition} --tasks-per-node {cluster.tasks-per-node}  -t {cluster.time} -o {cluster.output} -e {cluster.error} -J {cluster.job-name} -N {cluster.nodes}" --latency-wait 60
+
+rule all:
+    input: 
+        expand(os.path.join(WD, "TEcounts/unique_strand/{sample}_FL_L1HS_L1PA4_HERV_count_matrix_0.csv"), sample=SAMPLES)
+ 
+
+rule split_bam_strand_fwd:
+    input:
+        sample = os.path.join(WD, "Unique_hg38_STAR/{sample}Aligned.sortedByCoord.out.bam")
+    output:
+        forward = os.path.join(WD, "map/unique_strand/{sample}/{sample}Aligned.sortedByCoord.forward.out.bam")
+    shell:
+        """
+        module purge
+        ml GCC/11.3.0 SAMtools/1.16.1
+
+        cp {input.sample} $TMPDIR/{wildcards.sample}.bam
+         
+        samtools view -@ 5 -b -f 128 -F 16 $TMPDIR/{wildcards.sample}.bam > $TMPDIR/{wildcards.sample}_fwd1.bam 
+        samtools view -@ 5 -b -f 80 $TMPDIR/{wildcards.sample}.bam > $TMPDIR/{wildcards.sample}_fwd2.bam
+        samtools merge -@ 5 -f {output.forward} $TMPDIR/{wildcards.sample}_fwd1.bam $TMPDIR/{wildcards.sample}_fwd2.bam
+
+        """
+
+rule split_bam_strand_rev:
+    input:
+        sample = os.path.join(WD, "Unique_hg38_STAR/{sample}Aligned.sortedByCoord.out.bam")
+    params:
+        rev1 = os.path.join(WD, "map/unique_strand/{sample}/{sample}Aligned.sortedByCoord.reverse1.out.bam"),
+        rev2 = os.path.join(WD, "map/unique_strand/{sample}/{sample}Aligned.sortedByCoord.reverse2.out.bam")
+    output:
+        rev = os.path.join(WD, "map/unique_strand/{sample}/{sample}Aligned.sortedByCoord.reverse.out.bam")
+    shell:
+        """
+        module purge
+        ml GCC/11.3.0 SAMtools/1.16.1
+
+        cp {input.sample} $TMPDIR/{wildcards.sample}.bam
+
+        samtools view -b -f 144 $TMPDIR/{wildcards.sample}.bam > $TMPDIR/{wildcards.sample}_rev1.bam 
+        samtools view -b -f 64 -F 16 $TMPDIR/{wildcards.sample}.bam > $TMPDIR/{wildcards.sample}_rev2.bam
+        samtools merge -f {output.rev} $TMPDIR/{wildcards.sample}_rev1.bam $TMPDIR/{wildcards.sample}_rev2.bam
+
+        """
+
+rule TE_quantification_strand:
+    input:
+        TEgtf = "hg38_rmsk_TEtranscripts_FL_L1HS_L1PA4_HERVs_prediction.gtf",
+        forward = os.path.join(WD, "map/unique_strand/{sample}/{sample}Aligned.sortedByCoord.forward.out.bam"),
+        rev = os.path.join(WD, "map/unique_strand/{sample}/{sample}Aligned.sortedByCoord.reverse.out.bam")
+    output:
+        os.path.join(WD, "TEcounts/unique_strand/{sample}_FL_L1HS_L1PA4_HERV_count_matrix_0.csv")
+    shell:
+        """ 
+        module purge
+
+        module load subread/1.6.3-virt
+        subread-parse.sh featureCounts -T 20 -p -s 0 -F GTF -g transcript_id -a {input.TEgtf} -o {output} {input.forward} {input.rev}
+
+        module purge
+        """
+
+
