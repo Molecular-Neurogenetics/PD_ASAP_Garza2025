@@ -136,12 +136,12 @@ reshape2::melt() %>%
 
 ## Write to files names/IDs of expressed ERVs
 ```{r}
-write.table(rownames(te_counts_norm_expressed), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed.tab", quote = F, row.names = F, col.names = F)
-write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("PFC", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PFC.tab", quote = F, row.names = F, col.names = F)
-write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("AMY", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_AMY.tab", quote = F, row.names = F, col.names = F)
-write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("PUT", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_PUT.tab", quote = F, row.names = F, col.names = F)
-write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("SN", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_fl_hervs_expressed_sorted_mean_expression_SN.tab", quote = F, row.names = F, col.names = F)
-write.table(names(which(sort(rowSums(te_counts_norm[,samplesheet_wo_outliers$sample])) == 0)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/not_expressed_fl_hervs.tab", quote = F, row.names = F, col.names = F)
+write.table(rownames(te_counts_norm_expressed), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_ervs_expressed.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("PFC", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_ervs_expressed_sorted_mean_expression_PFC.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("AMY", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_ervs_expressed_sorted_mean_expression_AMY.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("PUT", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_ervs_expressed_sorted_mean_expression_PUT.tab", quote = F, row.names = F, col.names = F)
+write.table(names(sort(rowSums(te_counts_norm_expressed[, colnames(te_counts_norm_expressed)[grepl("SN", colnames(te_counts_norm_expressed))]]), decreasing = T)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_ervs_expressed_sorted_mean_expression_SN.tab", quote = F, row.names = F, col.names = F)
+write.table(names(which(sort(rowSums(te_counts_norm[,samplesheet_wo_outliers$sample])) == 0)), "/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/not_expressed_ervs.tab", quote = F, row.names = F, col.names = F)
 ```
 
 ## How many are shared between regions? How many are region specific?
