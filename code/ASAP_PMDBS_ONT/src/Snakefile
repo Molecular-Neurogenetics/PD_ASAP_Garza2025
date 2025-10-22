@@ -1,0 +1,237 @@
+# -*- coding: utf-8 -*-
+import os
+WD = "/scale/gr01/shared/jjakobsson/processed/ASAP_ONT/"
+configfile: "/scale/gr01/shared/jjakobsson/processed/ASAP_ONT/src/config_files/config.json"
+
+RNA = config["rna"]
+DNA = config["dna"]
+
+# Run as:
+# snakemake -j 5 --cluster-config /scale/gr01/shared/jjakobsson/processed/ASAP_ONT/src/config_files/lunarc_config.json --cluster "sbatch -A {cluster.account} -p {cluster.partition} --tasks-per-node {cluster.tasks-per-node}  -t {cluster.time} -o {cluster.output} -e {cluster.error} -J {cluster.job-name} -N {cluster.nodes}" --latency-wait 60
+
+rule all:
+    input:
+        expand(os.path.join(WD, "1_map/{sample}_RNA_L1consensus.sorted.bam"), sample=RNA),
+        expand(os.path.join(WD, "1_map/{sample}_DNA.sorted.bam"), sample=DNA),
+        
+##################################################################
+########################### Direct RNA ###########################
+##################################################################
+
+rule basecall_RNA:
+    input:
+        model = "/scale/gr01/shared/jjakobsson/backup/nino_fs1_jakobssonlab/ONT_models/rna004_130bps_sup@v3.0.1",
+        bases_model = "/scale/gr01/shared/jjakobsson/backup/nino_fs1_jakobssonlab/ONT_models/rna004_130bps_sup@v3.0.1_m6A_DRACH@v1"
+    params:
+        pod5 = lambda wildcards: f"/scale/gr01/shared/jjakobsson/backup/ASAP_ONT/{config['rna'][wildcards.sample]}/pod5_skip/"
+    output:
+        bam = os.path.join(WD, "0_basecall/{sample}_RNA.bam"),
+        fastq = os.path.join(WD, "0_basecall/{sample}_RNA.fastq")
+    shell:
+        """
+        ml GCC/11.3.0 OpenMPI/4.1.4 GCCcore/11.3.0 dorado/0.7.1-CUDA-11.7.0 SAMtools/1.16.1
+
+        dorado basecaller {input.model} --modified-bases-models {input.bases_model} {params.pod5} > {output.bam} || exit 2
+
+        samtools fastq -T "*" {output.bam} > {output.fastq} || exit 2
+        """
+
+rule map_rna:
+    input:
+        bam = os.path.join(WD, "0_basecall/{sample}_RNA.bam"),
+        fastq = os.path.join(WD, "0_basecall/{sample}_RNA.fastq")
+    params:
+        genome = "/scale/gr01/shared/jjakobsson/processed/raquelgg_fs1_jakobssonlab/indices/hg38_minimap2_index/hg38.mmi"
+    output:
+        map_bam_sort = os.path.join(WD, "1_map/{sample}_RNA.sorted.bam")
+    shell:
+        """
+        ml GCC/11.3.0 OpenMPI/4.1.4 GCCcore/11.3.0 minimap2/2.24 SAMtools/1.16.1
+
+        minimap2 -ax splice -uf -k14 -y {params.genome} {input.fastq} | samtools view -b | samtools sort > {output.map_bam_sort} || exit 2
+
+        samtools index {output.map_bam_sort}
+
+        """
+
+# Map direct RNA data to L1 consensus sequence
+rule map_rna_L1:
+    input:
+        bam = os.path.join(WD, "0_basecall/{sample}_RNA.bam"),
+        fastq = os.path.join(WD, "0_basecall/{sample}_RNA.fastq")
+    params:
+        genome = "/scale/gr01/shared/jjakobsson/processed/raquelgg_lunarc_home/L1BD/L1BD_consensus_FL_L1HS_L1PA2_minimap2_index/human_L1_consensus_sequences_cons.mmi"
+    output:
+        map_bam_sort = os.path.join(WD, "1_map/{sample}_RNA_L1consensus.sorted.bam")
+    shell:
+        """
+        ml GCC/11.3.0 OpenMPI/4.1.4 GCCcore/11.3.0 minimap2/2.24 SAMtools/1.16.1
+
+        minimap2 -ax splice -uf -k14 -y {params.genome} {input.fastq} | samtools view -b | samtools sort > {output.map_bam_sort} || exit 2
+
+        samtools index {output.map_bam_sort}
+        """
+
+
+rule bigwig:
+    input:
+        bam = os.path.join(WD, "1_map/{sample}_RNA.sorted.bam"),
+        bai = os.path.join(WD, "1_map/{sample}_RNA.sorted.bam.bai")
+    output:
+        bw = os.path.join(WD, "1_map/{sample}_RNA.sorted.bw"),
+        fwd = os.path.join(WD, "1_map/{sample}_RNA.sorted.fwd.bw"),
+        rev = os.path.join(WD, "1_map/{sample}_RNA.sorted.rev.bw")
+    shell:
+        """
+        module purge
+        ml GCC/10.2.0  OpenMPI/4.0.5 deepTools/2.5.4
+        cp {input.bam} $TMPDIR/in.bam
+        cp {input.bai} $TMPDIR/in.bam.bai
+
+        bamCoverage --normalizeUsingRPKM -b $TMPDIR/in.bam -o {output.bw}
+
+        bamCoverage --normalizeUsingRPKM --filterRNAstrand forward -b $TMPDIR/in.bam -o {output.fwd}
+        bamCoverage --normalizeUsingRPKM --filterRNAstrand reverse -b $TMPDIR/in.bam -o {output.rev}
+
+        module purge
+        """
+
+rule bamtobed:
+    input:
+        bam = os.path.join(WD, "1_map/{sample}_RNA.sorted.bam")
+    output:
+        bed = os.path.join(WD, "1_map/{sample}_RNA.sorted.bed")
+    shell:
+        """
+        module purge
+        ml GCC/12.3.0 BEDTools/2.31.0
+
+        bedtools bamtobed -split -tag NM -i {input} > {output}
+
+        module purge
+        """
+
+rule extract_junctions:
+    input:
+        bam = os.path.join(WD, "1_map/{sample}_RNA.sorted.bam"),
+        regtools = os.path.join(WD, "src/singularities/regtools_release-1.0.0.sif")
+    output:
+        bed = os.path.join(WD, "1_map/{sample}_RNA.sorted.junctions.bed")
+    shell:
+        """
+        module purge
+
+        singularity exec --bind /scale/gr01/shared/jjakobsson/processed/ --bind $TMPDIR:/tmp/ {input.regtools} regtools junctions extract {input.bam} -o {output.bed}
+
+        module purge
+        """
+
+rule computeMatrix:
+     input:
+        fwd = os.path.join(WD, "1_map/{sample}_RNA.sorted.fwd.bw"),
+        rev = os.path.join(WD, "1_map/{sample}_RNA.sorted.rev.bw"),
+        pos_l1hs = "regions_positive_l1hs_expressed.bed",
+        pos_l1pa2 = "regions_positive_l1pa2_expressed.bed",
+        pos_l1pa3 = "regions_positive_l1pa3_expressed.bed",
+        neg_l1hs = "regions_negative_l1hs_expressed.bed",
+        neg_l1pa2 = "regions_negative_l1pa2_expressed.bed",
+        neg_l1pa3 = "regions_negative_l1pa3_expressed.bed"
+     output:
+        positive = os.path.join(WD, "deeptools/FL_L1PAs/{sample}_FL_L1PAs_positive_expressed.mtx"),
+        negative = os.path.join(WD, "deeptools/FL_L1PAs/{sample}_FL_L1PAs_negative_expressed.mtx")
+     shell:
+        """
+        module purge
+        ml GCC/10.2.0  OpenMPI/4.0.5 deepTools/2.5.4 
+ 
+        computeMatrix scale-regions -R  {input.pos_l1hs} {input.pos_l1pa2} {input.pos_l1pa3} -S {input.fwd} {input.rev} --regionBodyLength 6000 -b 6000 -a 6000 -o {output.positive} 
+ 
+        computeMatrix scale-regions -R {input.neg_l1hs} {input.neg_l1pa2} {input.neg_l1pa3} -S {input.rev} {input.fwd} --regionBodyLength 6000 -b 6000 -a 6000 -o {output.negative}
+        """
+
+
+#####################################################################
+############################## DNA WGS ##############################
+#####################################################################
+
+rule map_dna:
+    input:
+        genome = "/scale/gr01/shared/jjakobsson/processed/raquelgg_fs1_jakobssonlab/indices/hg38_minimap2_index/hg38.mmi",
+        fastq = os.path.join(WD, "0_basecall/{sample}_DNA.fastq")
+    output:
+        map_bam_sort = os.path.join(WD, "1_map/{sample}_DNA.sorted.bam"),
+        map_bai = os.path.join(WD, "1_map/{sample}_DNA.sorted.bam.bai")
+    shell:
+        """
+        ml GCC/11.3.0 OpenMPI/4.1.4 GCCcore/11.3.0 minimap2/2.24 SAMtools/1.16.1
+        ls {input.fastq} | wc -l
+        echo "minimap2 -y  -t 20 -a -x map-ont {input.genome} {input.fastq}"
+
+        minimap2 -y -t 20 -a -x map-ont {input.genome} {input.fastq} | samtools view -@ 20 -b | samtools sort -m 3G -T $TMPDIR -@ 20 > {output.map_bam_sort} || exit 2
+
+        samtools index {output.map_bam_sort}
+
+        """
+
+# Basecalling for ASAP DNA samples was done in the machine without methylation calls so we need to rerun it
+rule modfastq_DNA:
+    input:
+        model = "/scale/gr01/shared/jjakobsson/processed/dorado/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0"
+    params:
+        indir = lambda wildcards: f"/scale/gr01/shared/jjakobsson/backup/ASAP_ONT/{config['dna'][wildcards.sample]}/bam_pass/"
+    output:
+        fastq = os.path.join(WD, "0_basecall/{sample}_DNA.fastq")
+    shell:
+        """
+        module purge
+        ml GCC/11.3.0 SAMtools/1.16.1
+
+        for i in $(ls {params.indir}*.bam); do samtools fastq -@ 10 -T "*" $i >> {output.fastq}; done;
+
+        module purge
+        """
+
+# Basecalling for ASAP DNA samples was done in the machine 
+rule basecall_DNA:
+    input:
+        model = "/scale/gr01/shared/jjakobsson/processed/dorado/models/dna_r10.4.1_e8.2_400bps_sup@v4.3.0"
+    params:
+        indir = lambda wildcards: f"/scale/gr01/shared/jjakobsson/backup/ASAP_ONT/{config['dna'][wildcards.sample]}/pod5/"
+    output:
+        bam = os.path.join(WD, "0_basecall/{sample}/{sample}_DNA.bam"),
+        fastq = os.path.join(WD, "0_basecall/{sample}/{sample}_DNA.fastq")
+    shell:
+        """
+        module purge
+        ml GCC/11.3.0 OpenMPI/4.1.4 GCCcore/11.3.0 dorado/0.7.1-CUDA-11.7.0 SAMtools/1.16.1
+        dorado basecaller -r {input.model} {params.indir} --modified-bases 5mCG_5hmCG > {output.bam} || exit 2
+
+        samtools fastq -T "*" {output.bam} > {output.fastq} || exit 2
+        module purge
+        """
+
+rule modkit_pileup:
+    input:
+        fasta = "/scale/gr01/shared/jjakobsson/processed/raquelgg_fs3_jakobssonlab/annotations/hg38/gencode/GRCh38.p13/GRCh38.p13.genome.fa",  
+        fai = "/scale/gr01/shared/jjakobsson/processed/raquelgg_fs3_jakobssonlab/annotations/hg38/gencode/GRCh38.p13/GRCh38.p13.genome.fa.fai", 
+        bam = os.path.join(WD, "1_map/{sample}_DNA.sorted.bam"),
+        bai = os.path.join(WD, "1_map/{sample}_DNA.sorted.bam.bai")
+    params:
+        modkit = "/scale/gr01/shared/jjakobsson/processed/raquelgg_fs1_jakobssonlab/singularities/modkit_latest.sif",
+        bed =  os.path.join(WD, "2_modkit/{sample}_DNA_cpg.bed")
+    output:
+        bed =  os.path.join(WD, "2_modkit/{sample}_DNA_cpg.bed.gz")
+    shell:
+        """
+        echo "The bed file to be generated: " {output.bed}
+        cp {input.bam} $TMPDIR/{wildcards.sample}.bam
+        cp {input.bai} $TMPDIR/{wildcards.sample}.bam.bai
+        cp {input.fasta} $TMPDIR/genome.fa
+        cp {input.fai} $TMPDIR/genome.fa.fai
+
+        singularity exec --bind /scale/gr01/shared/jjakobsson/processed/ --bind $TMPDIR:/tmp/ {params.modkit} modkit pileup /tmp/{wildcards.sample}.bam {params.bed} --ref /tmp/genome.fa --cpg --combine-strands -t 25
+
+        singularity exec --bind /scale/gr01/shared/jjakobsson/processed/ --bind $TMPDIR:/tmp/ {params.modkit} bgzip {params.bed}
+
+        """
+
