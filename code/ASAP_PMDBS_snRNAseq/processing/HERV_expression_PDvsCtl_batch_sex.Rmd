@@ -1,0 +1,320 @@
+---
+title: "Microglia ERV Differential Expression Analysis: batch and sex covariates"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Overview 
+
+This notebook is a repetition of HERV_expression_PDvsCtl.Rmd to verify that the results hold when including genes and TEs into the same data frame and adjusting for batch and sex effects in the design formula of the differential expression analyses.
+
+## Set up
+Loading data and needed libraries
+```{r}
+library(DESeq2)
+library(data.table)
+library(ggpubr)
+library(EnhancedVolcano)
+library(limma)
+library(variancePartition)
+library(ggplot2)
+library(tidyverse)
+library(ggpmisc)
+library(openxlsx)
+source("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/TE_DEA_functions.R")
+source("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/processing/TE_heatmap_functions.R")
+# Load samplesheet
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+regions <- c("SN", "PUT", "PFC", "AMY")
+# Load ids of expressed elements in bulk data
+expressed_hervs_bulkrna <- fread("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_ervs_expressed.tab", data.table = F, header = F)$V1
+expressed_l1s_bulkrna <- fread("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/expressed_FL_L1HS_L1PA3_expressed.tab", data.table = F, header = F)$V1
+```
+
+## 1. Differential Expression Analysis (DEA) with DESeq2
+
+* Build DESeq2 datasets for each region-cluster combination
+* Adjust for batch and sex
+* Calculate variance per covariate using limma voom
+* Compare PD vs. Control, apply shrinkage (lfcShrink)
+* Save results as excel tables (clean data)
+
+```{r}
+te_dds_list <- list()
+te_alt_dds_list <- list()
+te_exp_list <- list()
+te_alt_exp_list <- list()
+te_res_list <- list()
+te_alt_res_list <- list()
+te_res_list_df <- list()
+te_alt_res_list_df <- list()
+te_varPart_list <- list()
+te_var_plot_list <- list()
+regions <- c("SN", "PUT", "PFC", "AMY")
+cluster = "4"
+te_dds_list[[cluster]] <- list()
+te_alt_dds_list[[cluster]] <- list()
+te_exp_list[[cluster]] <- list()
+te_alt_exp_list[[cluster]] <- list()
+te_res_list[[cluster]] <- list()
+te_alt_res_list[[cluster]] <- list()
+te_res_list_df[[cluster]] <- list()
+te_alt_res_list_df[[cluster]] <- list()
+for(region in regions){
+  print(cluster)
+  print(region)
+  te_counts <- list()
+  gene_te_counts <- fread(paste("~/inbox/ASAP/trusTEr_output_vs2/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+  hervs_te_counts <- fread(paste("~/inbox/ASAP/trusTEr_output_vs2/", region,"/HERV_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+  rownames(hervs_te_counts) <- hervs_te_counts$Geneid
+  hervs_te_counts <- hervs_te_counts[expressed_hervs_bulkrna,]
+  l1s_te_counts <- fread(paste("~/inbox/ASAP/trusTEr_output_vs2/", region,"/L1_expressed_counts_", region,"_",cluster,".csv", sep=""), data.table = F)
+  te_counts[[region]] <- rbind(gene_te_counts, l1s_te_counts, hervs_te_counts)
+  rownames(te_counts[[region]]) <- te_counts[[region]]$Geneid
+  
+  samplesheet_list <- split(samplesheet, f = samplesheet$Region)
+  num_nuclei <- read.table(paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/number_nuclei/",region, "_clusters.txt", sep=""), header = F, skip = 1)
+  colnames(num_nuclei) <- c("cluster", "num_nuclei")
+  # There is a "total" row. I'll remove that for convenience
+  num_nuclei <- num_nuclei[which(num_nuclei$cluster != "total"),]
+  rownames(num_nuclei) <- num_nuclei$cluster
+  # Just keep pseudobulks with at least 100 nuclei (arbitrary)
+  num_nuclei <- num_nuclei[which(num_nuclei$num_nuclei > 100),] # Remove tiny pseudobulks
+  
+  rownames(samplesheet_list[[region]]) <- samplesheet_list[[region]]$Sample
+  samples_cluster <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+  samples_cluster <- samples_cluster[which(samples_cluster %in% colnames(te_counts[[region]])  & samples_cluster %in% num_nuclei$cluster)]
+  rownames(samplesheet_list[[region]]) <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+  rownames(te_counts[[region]]) <- te_counts[[region]]$Geneid
+  # Expressed in bulk RNA
+  
+  if(length(samples_cluster) > 0){
+    if(all(table(samplesheet_list[[region]][samples_cluster, "Dx"]) > 3)){
+      # Expressed in snRNA
+      te_counts[[region]] <- te_counts[[region]][which(rowSums(te_counts[[region]][,samples_cluster]) > 0),]
+      
+      # Assess covariate variance
+      design <- model.matrix(~ Seqnum + Sex + Dx, data = samplesheet_list[[region]][samples_cluster,])
+      form <- ~ Seqnum + Sex + Dx
+      vobj <- voom(te_counts[[region]][,samples_cluster]+1, design)
+      region_cluster <- paste(region, cluster, sep="_")
+      tryCatch({
+        te_varPart_list[[region_cluster]] <- fitExtractVarPartModel(vobj, form, samplesheet_list[[region]][samples_cluster,])
+        te_var_plot_list[[region_cluster]] <- plotVarPart(te_varPart_list[[region_cluster]]) + geom_hline(yintercept = 10)    
+        te_varPart_list[[region_cluster]]$group <- region_cluster
+      }, error = function(e2) {
+        warning(sprintf("Failed for Cluster %s, Region %s: %s", cluster, region, e2$message))
+        return(NULL)
+      })
+      
+      if(length(samples_cluster) > 0){
+        if(all(table(samplesheet_list[[region]][samples_cluster, "Dx"]) > 3)){
+          te_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((te_counts[[region]][,samples_cluster]+1), samplesheet_list[[region]][samples_cluster,], design =  ~ Seqnum + Sex + Dx)
+          te_dds_list[[cluster]][[region]]$Dx <- relevel(te_dds_list[[cluster]][[region]]$Dx, "Ctl")
+          te_dds_list[[cluster]][[region]] <- DESeq(te_dds_list[[cluster]][[region]])
+          te_exp_list[[cluster]][[region]] <- getAverage(te_dds_list[[cluster]][[region]])
+          te_res_list[[cluster]][[region]] <- results(te_dds_list[[cluster]][[region]], )
+          te_res_list_df[[cluster]][[region]] <- as.data.frame(te_res_list[[cluster]][[region]])
+          te_res_list_df[[cluster]][[region]]$Geneid <- rownames(te_res_list_df[[cluster]][[region]])
+          
+          alt_formula <- "~"
+          if(mean(te_varPart_list[[region_cluster]]$Seqnum) > 0.15){
+            alt_formula <- ifelse(alt_formula == "~", paste(alt_formula, "Seqnum"), paste(alt_formula, "Seqnum",sep=" + "))
+          }
+          if(mean(te_varPart_list[[region_cluster]]$Sex) > 0.15){
+            alt_formula <- ifelse(alt_formula == "~", paste(alt_formula, "Sex"), paste(alt_formula, "Sex",sep=" + "))
+          }
+          alt_formula <- paste(alt_formula, "Dx", sep=" + ")
+          if(alt_formula != "~ Seqnum + Sex + Dx"){
+            alt_formula <- as.formula(alt_formula)
+            te_alt_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((te_counts[[region]][,samples_cluster]+1), samplesheet_list[[region]][samples_cluster,], design =  alt_formula)
+            te_alt_dds_list[[cluster]][[region]]$Dx <- relevel(te_alt_dds_list[[cluster]][[region]]$Dx, "Ctl")
+            te_alt_dds_list[[cluster]][[region]] <- DESeq(te_alt_dds_list[[cluster]][[region]])
+            te_alt_exp_list[[cluster]][[region]] <- getAverage(te_alt_dds_list[[cluster]][[region]])
+            te_alt_res_list[[cluster]][[region]] <- results(te_alt_dds_list[[cluster]][[region]], )
+            te_alt_res_list_df[[cluster]][[region]] <- as.data.frame(te_alt_res_list[[cluster]][[region]])
+            te_alt_res_list_df[[cluster]][[region]]$Geneid <- rownames(te_alt_res_list_df[[cluster]][[region]])
+          }
+        }
+      }
+    }
+  }
+}
+
+do.call(rbind, te_varPart_list) %>% 
+  group_by(group) %>% 
+  summarize(mean_batch_var = mean(Seqnum), mean_sex_var = mean(Sex)) %>% 
+  openxlsx::write.xlsx("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/mean_covariate_variance_per_pseudobulk.xlsx")
+```
+
+```{r}
+get_subset_plots <- function(coldata, exp, res, title, select){
+   select <- select[which(select %in% rownames(res))]
+    tmp <- EnhancedVolcano(res[select,], drawConnectors = T, lab = NA, x = 'log2FoldChange',y = 'padj',pCutoff = 0.05,FCcutoff = 1)
+      tmp$data$Sig <- ifelse(tmp$data$log2FoldChange > 1 & tmp$data$Sig == "FC_P", "Upregulated", 
+                             ifelse(tmp$data$log2FoldChange < -1 & tmp$data$Sig == "FC_P", "Downregulated", "Not significant"))
+      tmp$data$Sig <- paste(tmp$data$Sig, table(tmp$data$Sig)[tmp$data$Sig], sep = ": ")
+      
+      not_sig_lab <- unique(tmp$data$Sig)[startsWith(unique(tmp$data$Sig), "Not significant")]
+      up_sig_lab <- unique(tmp$data$Sig)[startsWith(unique(tmp$data$Sig), "Upregulated")]
+      down_sig_lab <- unique(tmp$data$Sig)[startsWith(unique(tmp$data$Sig), "Downregulated")]
+      
+      if(length(unique(tmp$data$Sig)) == 1){
+        point_colours <- c("grey")
+      }
+      if(length(unique(tmp$data$Sig)) == 2){
+        if(any(str_detect(unique(tmp$data$Sig), "Upregulated"))){
+          point_colours <- c("grey","tomato")
+        }
+      }
+      if(length(unique(tmp$data$Sig)) == 2){
+        if(any(str_detect(unique(tmp$data$Sig), "Downregulated"))){
+          point_colours <- c("grey","darkturquoise")
+        }
+      }
+      if(length(unique(tmp$data$Sig)) == 3){
+        point_colours <- c("grey","darkturquoise", "tomato")
+        names(point_colours) <- c(not_sig_lab, down_sig_lab, up_sig_lab)
+      }
+      point_sizes <- c(1,2,2)
+      names(point_sizes) <- c(not_sig_lab, down_sig_lab, up_sig_lab)  
+      
+      tmp <- tmp$data
+      volcano_plot <- ggplot(tmp, aes(x=log2FoldChange, y=-log10(padj), colour=Sig, size=Sig)) + geom_point(alpha=0.7) + 
+        geom_vline(xintercept = 1, linetype="dotted") + geom_vline(xintercept = -1, linetype="dotted") + 
+        geom_hline(yintercept = -log10(0.1), linetype="dotted") + labs(colour="") + 
+        scale_color_manual(values = point_colours)  + 
+        scale_size_manual(values = point_sizes, guide="none") +
+        theme_bw() +
+        theme(text = element_text(size=15), panel.grid.minor = element_blank(), panel.grid.major = element_blank()) +
+        ggtitle(title)
+      
+      effect <- unique(coldata[which(coldata$Dx != "Ctl"),"Dx"])
+      mean_plot <- meanPlot_cus(exp = exp$Mean[select,],
+                                                           test = res, 
+                                                           col1 = ifelse(length(unique(tmp$Sig)) == 3, "tomato", 
+                                                                         ifelse(any(str_detect(unique(tmp$Sig), "Downregulated")), "grey", "darkturquoise")), 
+                                                           col2 = ifelse(length(unique(tmp$Sig)) == 3, "darkturquoise", 
+                                                                         ifelse(any(str_detect(unique(tmp$Sig), "Downregulated")), "darkturquoise", "grey")), 
+                                                           col3 = ifelse(length(unique(tmp$Sig)) == 3, "grey", 
+                                                                         ifelse(any(str_detect(unique(tmp$Sig), "Upregulated")), "tomato", "grey")),
+                                                           c1 = effect, c2="Ctl", p = 0.05, l=1, ttl = title, repel = F)
+      return(list("volcano" = volcano_plot, "mean" = mean_plot))
+}
+```
+
+
+```{r}
+herv_plots_list <- list()
+l1_plots_list <- list()
+genes_plots_list <- list()
+all_plots_list <- list()
+for(cluster in as.character(0:7)){
+  for(region in regions){ 
+    if(!all(is.na(te_res_list[[cluster]][[region]]))){
+        coldata = samplesheet_list[[region]]
+        exp = te_exp_list[[cluster]][[region]]
+        res = te_res_list[[cluster]][[region]]
+        title = paste(region, cluster, sep=": cluster ")
+        herv_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, expressed_hervs_bulkrna)
+        l1_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, expressed_l1s_bulkrna)
+        genes <- rownames(res)[which(!rownames(res) %in% c(expressed_hervs_bulkrna, expressed_l1s_bulkrna))]
+        genes_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, genes)
+        all_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, rownames(res))
+    }
+  }
+}
+
+herv_alt_plots_list <- list()
+l1_alt_plots_list <- list()
+genes_alt_plots_list <- list()
+all_alt_plots_list <- list()
+for(cluster in as.character(0:7)){
+  for(region in regions){ 
+    if(!all(is.na(te_alt_res_list[[cluster]][[region]]))){
+        coldata = samplesheet_list[[region]]
+        exp = te_alt_exp_list[[cluster]][[region]]
+        res = te_alt_res_list[[cluster]][[region]]
+        title = paste(region, cluster, sep=": cluster ")
+        herv_alt_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, expressed_hervs_bulkrna)
+        l1_alt_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, expressed_l1s_bulkrna)
+        genes <- rownames(res)[which(!rownames(res) %in% c(expressed_hervs_bulkrna, expressed_l1s_bulkrna))]
+        genes_alt_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, genes)
+        all_alt_plots_list[[title]] <- get_subset_plots(coldata, exp, res, title, rownames(res))
+    }
+  }
+}
+herv_plots_list$`SN: cluster 4`
+l1_plots_list$`SN: cluster 4`
+
+```
+
+## How well does this correlate without batch and sex in the model? 
+
+### ERVs
+```{r}
+te_res_nocov_list_df <- list()
+te_res_nocov_list_df[["4"]] <- list()
+te_res_nocov_list_df[["4"]][["SN"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/HERVs_cluster_4_DEA_snRNAseq.xlsx", sheet = "SN")
+te_res_nocov_list_df[["4"]][["PUT"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/HERVs_cluster_4_DEA_snRNAseq.xlsx", sheet = "PUT")
+te_res_nocov_list_df[["4"]][["PFC"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/HERVs_cluster_4_DEA_snRNAseq.xlsx", sheet = "PFC")
+te_res_nocov_list_df[["4"]][["AMY"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/HERVs_cluster_4_DEA_snRNAseq.xlsx", sheet = "AMY")
+
+te_res_nocov_cov_corr_plot_list <- list()
+cluster = "4"
+for(region in regions){
+  signif <- te_res_nocov_list_df [[cluster]][[region]][which(te_res_nocov_list_df[[cluster]][[region]]$padj < 0.05), "TE_id"]
+  if(!is.null(te_res_list_df[[cluster]][[region]][te_res_nocov_list_df[[cluster]][[region]]$TE_id,"log2FoldChange"])){
+    tmp <- data.frame("TE_id" = te_res_nocov_list_df[[cluster]][[region]]$TE_id,
+                    "cov_corr_log2FC" = te_res_list_df[[cluster]][[region]][te_res_nocov_list_df[[cluster]][[region]]$TE_id,"log2FoldChange"],
+                    "nocov_log2FC" = te_res_nocov_list_df[[cluster]][[region]]$log2FoldChange,
+                    "reported_signif" = te_res_nocov_list_df[[cluster]][[region]]$TE_id %in% signif)
+  if(nrow(tmp) > 0){
+    te_res_nocov_cov_corr_plot_list[[paste(cluster, region, sep="_")]] <- tmp %>% 
+      arrange(reported_signif) %>% 
+    ggplot(aes(x = cov_corr_log2FC, y= nocov_log2FC)) + geom_hline(linetype = "dashed", color= "grey", yintercept = 0)  + geom_vline(linetype = "dashed", color= "grey", xintercept = 0)  + geom_point(aes(color=reported_signif, size = reported_signif)) + stat_poly_line(formula = y ~ x) +
+    stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label)), label.y = "top") + scale_size_manual(values = c("TRUE" = 1, "FALSE" = 0.3)) + scale_color_manual(values = c("TRUE" = "blue", "FALSE" = "black")) + 
+    stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label)), label.y = 0.85) +
+      theme_bw() + ggtitle(paste(region, cluster)) + labs(x="log2FC (covariate corrected)", y="log2FC (uncorrected)")  
+  }  
+  }
+}
+
+te_res_nocov_cov_corr_plot_list
+
+```
+
+### Now L1s
+```{r}
+te_res_nocov_list_df <- list()
+te_res_nocov_list_df[["4"]] <- list()
+te_res_nocov_list_df[["4"]][["SN"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/l1_cluster_4_DEA_snRNAseq.xlsx", sheet = "SN")
+te_res_nocov_list_df[["4"]][["PUT"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/l1_cluster_4_DEA_snRNAseq.xlsx", sheet = "PUT")
+te_res_nocov_list_df[["4"]][["PFC"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/l1_cluster_4_DEA_snRNAseq.xlsx", sheet = "PFC")
+te_res_nocov_list_df[["4"]][["AMY"]] <- openxlsx::read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/results/tables_vs2/l1_cluster_4_DEA_snRNAseq.xlsx", sheet = "AMY")
+
+te_res_nocov_cov_corr_plot_list <- list()
+cluster = "4"
+for(region in regions){
+  signif <- te_res_nocov_list_df[[cluster]][[region]][which(te_res_nocov_list_df[[cluster]][[region]]$padj < 0.05), "l1_id"]
+  if(!is.null(te_res_list_df[[cluster]][[region]][te_res_nocov_list_df[[cluster]][[region]]$l1_id,"log2FoldChange"])){
+    tmp <- data.frame("TE_id" = te_res_nocov_list_df[[cluster]][[region]]$l1_id,
+                    "cov_corr_log2FC" = te_res_list_df[[cluster]][[region]][te_res_nocov_list_df[[cluster]][[region]]$l1_id,"log2FoldChange"],
+                    "nocov_log2FC" = te_res_nocov_list_df[[cluster]][[region]]$log2FoldChange,
+                    "reported_signif" = te_res_nocov_list_df[[cluster]][[region]]$l1_id %in% signif)
+  if(nrow(tmp) > 0){
+    te_res_nocov_cov_corr_plot_list[[paste(cluster, region, sep="_")]] <- tmp %>% 
+      arrange(reported_signif) %>% 
+    ggplot(aes(x = cov_corr_log2FC, y= nocov_log2FC)) + geom_hline(linetype = "dashed", color= "grey", yintercept = 0)  + geom_vline(linetype = "dashed", color= "grey", xintercept = 0)  + geom_point(aes(color=reported_signif, size = reported_signif)) + stat_poly_line(formula = y ~ x) +
+    stat_poly_eq(formula = y ~ x, aes(label = after_stat(p.value.label)), label.y = "top") + scale_size_manual(values = c("TRUE" = 1, "FALSE" = 0.3)) + scale_color_manual(values = c("TRUE" = "blue", "FALSE" = "black")) + 
+    stat_poly_eq(formula = y ~ x, aes(label = after_stat(adj.rr.label)), label.y = 0.85) +
+      theme_bw() + ggtitle(paste(region, cluster)) + labs(x="log2FC (covariate corrected)", y="log2FC (uncorrected)")  
+  }  
+  }
+}
+
+te_res_nocov_cov_corr_plot_list
+
+```
