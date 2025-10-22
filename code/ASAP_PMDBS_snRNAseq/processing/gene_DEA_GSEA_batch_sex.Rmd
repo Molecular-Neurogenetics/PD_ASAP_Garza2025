@@ -1,0 +1,220 @@
+---
+title: "Cluster Gene Expression Analysis"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+## Overview
+
+This notebook is a repetition of gene_DEA_GSEA.Rmd to verify that the results hold when adjusting for batch and sex effects in the design formula of the differential expression analyses.
+
+### Inputs
+- trusTEr output files with gene counts per cluster/region
+- Sample metadata: ASAP_samplesheet.xlsx
+
+### Outputs
+- Differential expression results in microglia (excel files)
+- Gene set enrichment analyses results (excel files)
+- Figures showing:
+  - PD vs Control effects
+  - IFN enrichment across clusters
+
+### Notes
+- Only expressed genes (row sums > 0) are tested.
+
+## Setup: Load libraries and helper functions
+Load all required libraries and custom DEA functions
+```{r class.source = 'fold-hide'}
+library(DESeq2)
+library(data.table)
+library(ggpubr)
+library(ggplot2)
+library(tidyverse)
+library(openxlsx)
+library(pheatmap)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(EnhancedVolcano)
+
+
+source("TE_DEA_functions.R")
+```
+
+## Characterize PD effect per cluster
+Differential expression analyses for PD vs Control pseudobulks (adjusting for batch and sex) for each region in microglia (cluster 4). 
+Save results (one excel with region per sheet).
+```{r}
+samplesheet <- read.xlsx("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_snRNAseq/original/ASAP_samplesheet.xlsx")
+gene_dds_list <- list()
+gene_exp_list <- list()
+gene_res_list <- list()
+gene_res_list_df <- list()
+regions <- c("SN", "PUT", "AMY", "PFC")
+cluster <- "4" # Microglia cluster 
+gene_dds_list[[cluster]] <- list()
+gene_exp_list[[cluster]] <- list()
+gene_res_list[[cluster]] <- list()
+gene_res_list_df[[cluster]] <- list()
+for(region in regions){
+  print(cluster)
+  print(region)
+  gene_counts <- list()
+  gene_counts[[region]] <- fread(paste("~/inbox/ASAP/trusTEr_output_vs2/", region,"/gene_counts_", region,"_",cluster,".csv", sep=""), sep = ",", data.table = F)
+  rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
+
+  samplesheet_list <- split(samplesheet, f = samplesheet$Region)
+
+  rownames(samplesheet_list[[region]]) <- samplesheet_list[[region]]$Sample
+  samples_cluster <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+  samples_cluster <- samples_cluster[which(samples_cluster %in% colnames(gene_counts[[region]]))]
+  rownames(samplesheet_list[[region]]) <- paste(rownames(samplesheet_list[[region]]), cluster, sep="_")
+  rownames(gene_counts[[region]]) <- gene_counts[[region]]$Geneid
+  
+  expressed_genes <- rownames(gene_counts[[region]])[which(rowSums(gene_counts[[region]][,samples_cluster]) > 0)]
+  gene_dds_list[[cluster]][[region]] <- DESeqDataSetFromMatrix((gene_counts[[region]][expressed_genes,samples_cluster]+1), samplesheet_list[[region]][samples_cluster,], design =  ~ Seqnum + Sex + Dx) # Covariates with batch and sex
+  gene_dds_list[[cluster]][[region]]$Dx <- relevel(gene_dds_list[[cluster]][[region]]$Dx, "Ctl")
+  gene_dds_list[[cluster]][[region]] <- DESeq(gene_dds_list[[cluster]][[region]])
+  gene_res_list[[cluster]][[region]] <- results(gene_dds_list[[cluster]][[region]], )
+  gene_res_list_df[[cluster]][[region]] <- as.data.frame(gene_res_list[[cluster]][[region]])
+  gene_res_list_df[[cluster]][[region]]$gene_id <- rownames(gene_res_list_df[[cluster]][[region]])
+  print(names(gene_res_list_df[[cluster]]))
+}
+openxlsx::write.xlsx(gene_res_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gene_cluster_", cluster, "_PD_DEA_batch_sex_snRNAseq_res.xlsx", sep=""))
+
+
+```
+
+## Some helper functions for Gene Set Enrichment Analyses
+```{r}
+set.seed(10)
+gse_dotplot <- function(df){
+  genelist <- df[which(!is.na(df$log2FoldChange)),c("log2FoldChange", "gene_id"), drop=F]
+  genelist <- genelist[order(genelist$log2FoldChange, decreasing = T),]
+
+  genelist_FC <- genelist$log2FoldChange
+  names(genelist_FC) <- genelist$gene_id
+  gse <- gseGO(geneList=genelist_FC,
+               ont ="ALL",
+               keyType = "SYMBOL",
+               minGSSize = 3,
+               maxGSSize = 800,
+               seed = T,
+               pvalueCutoff = 0.05,
+               verbose = TRUE,
+               OrgDb = org.Hs.eg.db,
+               pAdjustMethod = "BH")
+  return(gse)
+}
+
+gse_pretty_dotplot <- function(gse, topn = 10, terms = NA){
+  gse <- gse@result
+  # gse <- gse[which(gse$ONTOLOGY == "BP"),]
+  gse$sign <- ifelse(gse$enrichmentScore > 0, "Activated", "Supressed")
+  gse$num_genes <- sapply(str_split(gse$core_enrichment, "/"), length)
+  gse$gene_ratio <- gse$num_genes / gse$setSize
+  gse$Description <- factor(gse$Description, levels = gse[order(gse$gene_ratio), "Description"])
+  
+  if(!all(is.na(terms))){
+    gse <- gse %>% 
+      drop_na() %>% 
+      filter(ID %in% terms)
+  }else{
+    gse <- gse[order(gse$NES, -log10(gse$p.adjust), decreasing = T),]
+  }
+  gse %>% 
+      drop_na() %>% 
+      ggplot(aes(x=Description, y=gene_ratio, size = num_genes, fill = p.adjust)) + geom_point(shape=21, colour="lightgrey") + facet_wrap(.~sign) + coord_flip() + theme_pubr(legend = "right", border = T) + labs(x="", fill="Padj", y = "Gene ratio", size = "Num genes") + scale_fill_gradientn(colors = c("firebrick1", "gray94")) + scale_size_continuous(range = c(2,8)) + theme(axis.text.y = element_text(size=10), strip.text.x = element_text(size = 10),axis.text.x = element_text(size=10),legend.text = element_text(size=10),legend.title = element_text(size=10)) 
+}
+```
+
+## Gene Set Enrichment Analyses (GSEA)
+
+For some reason the seed is not taken in by clusterProfiler, so the results from here onwards will be using the original run I did on this code (same but ever so slightly different numbers, loaded here at the end of the chunk). The clean data provided will be the original run I did. 
+
+* Test whether there is enrichment of GO-terms within the DEA results (log2FC based).
+* Save results to excel 
+```{r}
+gse_list <- list()
+gse_list_df <- list()
+gse_plot_list <- list()
+gse_list[[cluster]] <- list()
+gse_list_df[[cluster]] <- list()
+gse_plot_list[[cluster]] <- list()
+for(region in regions){ 
+  print(cluster)
+  print(region)
+  gse_list[[cluster]][[region]] <- gse_dotplot(df = gene_res_list_df[[cluster]][[region]])
+  gse_list_df[[cluster]][[region]] <- gse_list[[cluster]][[region]]@result
+  if(!is.null(gse_plot_list[[cluster]][[region]])){
+  # gse_plot_list[[cluster]][[region]] <- gse_pretty_dotplot(gse = gse_list[[cluster]][[region]], topn = 30) + ggtitle(paste(region, cluster, sep=" cluster: "))
+  }
+}
+if(length(gse_list_df[[cluster]]) > 0){
+openxlsx::write.xlsx(gse_list_df[[cluster]], paste("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_snRNAseq/results/tables/gse_cluster", cluster, "PD_GSEA_batch_sex_snRNAseq_res.xlsx", sep="_"))
+}
+
+```
+
+## IFN and viral related terms in microglia 
+```{r}
+cluster = "4"
+region = "SN"
+ifn_viral_related_go <- gse_list_df[[cluster]][[region]][which(grepl("interferon|vir", gse_list_df[[cluster]][[region]]$Description)), "ID"]
+gse_pretty_dotplot(gse = gse_list[[cluster]][[region]], topn = 10, terms = c(ifn_viral_related_go)) + ggtitle(paste(region, cluster, sep=" cluster: "))
+
+region = "PUT"
+ifn_viral_related_go <- gse_list_df[[cluster]][[region]][which(grepl("interferon|vir", gse_list_df[[cluster]][[region]]$Description)), "ID"]
+gse_pretty_dotplot(gse = gse_list[[cluster]][[region]], topn = 10, terms = c(ifn_viral_related_go)) + ggtitle(paste(region, cluster, sep=" cluster: "))
+
+region = "AMY"
+ifn_viral_related_go <- gse_list_df[[cluster]][[region]][which(grepl("interferon|vir", gse_list_df[[cluster]][[region]]$Description)), "ID"]
+gse_pretty_dotplot(gse = gse_list[[cluster]][[region]], topn = 10, terms = c(ifn_viral_related_go)) + ggtitle(paste(region, cluster, sep=" cluster: "))
+
+region = "PFC"
+ifn_viral_related_go <- gse_list_df[[cluster]][[region]][which(grepl("interferon|vir", gse_list_df[[cluster]][[region]]$Description)), "ID"]
+ifn_viral_related_go
+```
+
+## IFN related genes avg log2FC heatmaps
+
+IFN related genes that were up in PD SN microglia
+```{r}
+gene_res_list_df$`4`$SN$region <- "SN"
+gene_res_list_df$`4`$PUT$region <- "PUT"
+gene_res_list_df$`4`$PFC$region <- "PFC"
+gene_res_list_df$`4`$AMY$region <- "AMY"
+
+ifn_related_go <- gse_list_df[["4"]][["SN"]][which(grepl("interferon", gse_list_df[["4"]][["SN"]]$Description)), "Description"]
+tmp <- sapply(sapply(gse_list_df[["4"]][["SN"]][which(gse_list_df[["4"]][["SN"]]$Description %in% ifn_related_go), "core_enrichment"], str_split, "/"), unlist)
+names(tmp) <- NULL
+tmp <- unique(unlist(tmp))
+
+tmp_res <- rbind(gene_res_list_df$`4`$SN[tmp,],
+gene_res_list_df$`4`$PUT[tmp,],
+gene_res_list_df$`4`$PFC[tmp,],
+gene_res_list_df$`4`$AMY[tmp,])
+
+tmp_res <- unique(tmp_res)
+
+tmp_heatmap_log2FC <- reshape2::dcast(tmp_res, gene_id~region, value.var = "log2FoldChange")
+rownames(tmp_heatmap_log2FC) <- tmp_heatmap_log2FC$gene_id
+tmp_heatmap_pvalue <- reshape2::dcast(tmp_res, gene_id~region, value.var = "pvalue")
+tmp_heatmap_pvalue[is.na(tmp_heatmap_pvalue)] <- 1
+rownames(tmp_heatmap_pvalue) <- tmp_heatmap_pvalue$gene_id
+tmp_heatmap_pvalue <- tmp_heatmap_pvalue[,-1]
+tmp_heatmap_pvalue <- ifelse(tmp_heatmap_pvalue > 0.05, "", ifelse(tmp_heatmap_pvalue < 0.001, "***", ifelse(tmp_heatmap_pvalue < 0.01, "**", "*")))
+
+bk_neg <- seq(-3,0, length.out=50)
+bk_pos <- seq(0,3, length.out=50)
+bk <- c(bk_neg, bk_pos)
+bk <- unique(bk)
+color_pos <- colorRampPalette(c("white", "red"))(50)
+color_neg <- colorRampPalette(c("blue", "white"))(50)
+tmp_heatmap_log2FC[is.na(tmp_heatmap_log2FC)] <- 0
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1], breaks = bk, color = c(color_neg, color_pos), cluster_cols = F, main = "Core enrichment of enriched IFN-related\nGO terms in SN microglia", show_rownames = T, border_color = F, display_numbers = tmp_heatmap_pvalue)
+
+pheatmap::pheatmap(tmp_heatmap_log2FC[,-1], breaks = bk, color = c(color_neg, color_pos), cluster_cols = F, main = "Core enrichment of enriched IFN-related\nGO terms in SN microglia", show_rownames = F, border_color = F, display_numbers = tmp_heatmap_pvalue)
+
+```
