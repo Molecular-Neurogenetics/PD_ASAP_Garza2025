@@ -1,5 +1,5 @@
 ---
-title: "Cluster Gene Expression Analysis"
+title: "Microglia Gene Expression Analysis: batch and sex covariates"
 author: "Raquel Garza"
 output:
   html_document:
