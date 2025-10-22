@@ -1,0 +1,93 @@
+---
+title: "ASAP deep bulk RNAseq of PD and control postmortem samples"
+author: "Raquel Garza"
+output:
+  html_document:
+    df_print: paged
+---
+
+## Normalization and PCAs
+
+This small notebook was used to calculate gene size factors to perform normalization over TE counts, and show PCA analysis across the sequenced samples.
+
+## Sample composition
+
+```{r}
+library(data.table)
+library(ggplot2)
+library(ggpubr)
+library(openxlsx)
+library(tidyverse)
+library(stringr)
+library(DESeq2)
+samplesheet <- read.table("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/samplesheet.tab", header = T)
+region_dx <- as.data.frame(table(samplesheet$region, samplesheet$dx))
+
+region_dx %>% 
+  ggplot(aes(x=Var1, y=Freq, fill=Var2)) + geom_bar(stat="identity") + theme_bw() + labs(x="Region", y="Num of samples", fill="Dx") + ggtitle("ASAP deep bulk samples") + scale_fill_manual(values = c("lightgrey", "#8fd9ca"))
+```
+
+## Mapping percentages accross samples
+```{r}
+mapping <- read.table("/Volumes/MyPassport/ASAP/data/ASAP_PMDBS_bulkRNAseq/results/tables/star_alignment_plot.tsv", header = T) # Extracted from multiqc
+colnames(mapping) <- c("Category","uniquely_mapped","mapped_to_too_many_loci","unmapped_too_many_mismatches","unmapped_too_short","unmapped_other")
+
+mapping$mapped <- mapping$uniquely_mapped + mapping$mapped_to_too_many_loci
+mapping$unmapped <- mapping$unmapped_too_many_mismatches + mapping$unmapped_too_short + mapping$unmapped_other
+mapping_melt <- reshape2::melt(mapping[,c("Category", "mapped", "unmapped")])
+mapping_melt$variable <- factor(mapping_melt$variable, levels = c("unmapped", "mapped"))
+mapping_melt <- merge(mapping_melt, samplesheet, by.x="Category", by.y="sample")
+
+ggplot(mapping_melt, aes(y=Category, x=value, fill=variable)) + geom_bar(stat="identity", position = "fill") + facet_wrap(region~dx, scales = "free", ncol=4) + theme_bw() + labs(fill="") + scale_fill_manual(values = c("#e6e0a8", "#ffb7a1"))
+
+mapping$perc_mapped <- mapping$mapped / (mapping$mapped + mapping$unmapped)
+ggplot(mapping, aes(x=perc_mapped)) + geom_density(fill="#ffb7a1", color="#ffb7a1") + theme_bw() + labs(x="% of reads mapped", y="Density of samples") + ggtitle("ASAP bulk: Mapped reads")
+```
+
+## Exclude outlier sample
+
+ASAP203_ctrl_NP19-218_SN_bulk had only 43% reads mapped.
+
+```{r}
+samplesheet <- samplesheet[which(samplesheet$sample != "ASAP203_ctrl_NP19-218_SN_bulk"),] # Only 43% of reads mapped. Excluded
+rownames(mapping) <- mapping$Category
+rownames(samplesheet) <- samplesheet$sample
+
+# Mapping percentage density
+mapping[samplesheet$sample,] %>% 
+ggplot() + 
+  geom_density(aes(x=perc_mapped), fill="#ffb7a1", color="#ffb7a1")  + 
+  theme_bw() + labs(x="% of reads mapped", y="Density of samples") + ggtitle("ASAP bulk: Mapped reads") + xlim(c(0,1))                                         
+
+mapping[samplesheet$sample,] %>% 
+ggplot() + 
+  geom_point(aes(x=perc_mapped, y=mapped), color="#ffb7a1")  + theme_bw() + labs(x="% of reads mapped", y="Density of samples") + ggtitle("ASAP bulk: Mapped reads") + xlim(c(0,1))                                         
+
+```
+
+## Normalization size factors
+```{r}
+gene_counts <- fread("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/original/gene_counts/Fcounts_testASAPSamples.txt", data.table = F)
+colnames(gene_counts)[7:ncol(gene_counts)] <- sapply(str_split(sapply(str_split(colnames(gene_counts)[7:ncol(gene_counts)], "/"), tail, 1), "Aligned.sortedByCoord.out.bam"), head, 1)
+rownames(gene_counts) <- gene_counts$Geneid
+rownames(samplesheet) <- samplesheet$sample
+
+gene_dds <- DESeqDataSetFromMatrix(gene_counts[,samplesheet$sample], samplesheet, design =  ~ dx)
+gene_dds$dx <- relevel(gene_dds$dx, "Ctl")
+gene_dds <- DESeq(gene_dds)
+
+sizeFactors <- data.frame(sizeFactor = gene_dds$sizeFactor)
+sizeFactors$cluster <- rownames(sizeFactors)
+# write.table(sizeFactors, "/Volumes/MyPassport/ASAP_bulk/results/tables/sizefactors_gene.tab", sep = "\t", quote = F, row.names = F, col.names = T)
+sizeFactors <- read.table("/Volumes/MyPassport/ASAP/code/ASAP_PMDBS_bulkRNAseq/original/results/tables/sizefactors_gene.tab", header = T)
+```
+
+## PCAs
+```{r}
+gene_vst <- varianceStabilizingTransformation(gene_dds)
+plotPCA(gene_vst, intgroup="dx") + theme_bw() + ggtitle("Gene PCA: Dx")
+plotPCA(gene_vst, intgroup="region") + theme_bw() + ggtitle("Gene PCA: Region")
+plotPCA(gene_vst, intgroup="individual") + geom_line(aes(group=individual))+ theme_bw() + ggtitle("Gene PCA: Individual")
+plotPCA(gene_vst, intgroup="age") + theme_bw() + ggtitle("Gene PCA: Age")
+```
+
