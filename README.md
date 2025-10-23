@@ -24,8 +24,7 @@ ASAP_publication_repo/
 Each data type subfolder under `code/` follows the same structure:
 
 * `preprocessing/` — Snakemake workflows, Python scripts and notebooks for raw -> cleaned data
-* `processing/` — R Markdown notebooks and scripts for statistical analyses, derived tables, and most of publication figures
-* `visualization/` — R Markdown notebooks and scripts that use clean data tables to generate some of the publication figures
+* `processing/` — R Markdown notebooks and scripts for statistical analyses, derived tables, and publication figures
 
 ---
 
