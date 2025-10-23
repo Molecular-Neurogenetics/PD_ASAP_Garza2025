@@ -22,7 +22,7 @@ Each subfolder contains self-contained scripts or notebooks corresponding to one
 
 The `preprocessing/` folder includes scripts and pipelines for processing raw FASTQ files into gene- and TE-level count matrices. Typical tasks include:
 
-* Alignment to the reference genome (using STAR or similar)
+* Alignment to the reference genome (using STAR)
 * Quantification of gene expression and transposable elements
 
 Output: processed count matrices for genes and TEs.
