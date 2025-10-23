@@ -1,101 +1,63 @@
 # Activation of transposable elements is linked to a region- and cell-type-specific interferon response in Parkinson’s disease
 
-This repository contains code and processed data supporting the publication. It is organized by data type and analysis stage, with a focus on transparency, reproducibility, and clarity.
+This repository contains code, processed data, and environment files supporting the publication *Activation of transposable elements is linked to a region- and cell-type-specific interferon response in Parkinson’s disease* (Garza et al., 2025). The goal is to make analyses transparent and reproducible: each analysis step (preprocessing → processing → visualization) is organized by data type.
+
+> **Note:** Raw sequencing data are **not** included here due to size and privacy restrictions. Processed, analysis-ready tables and annotations are provided in `data/`.
 
 ---
 
-## Repository Structure
+## Repository layout
 
+```
 ASAP_publication_repo/
 
-├── data/ # Clean processed data (tables, annotations, results)
+├── data/                # Clean processed data (tables, annotations, results)
+├── code/                # Analysis code organized by data type and workflow stage
+│   ├── ASAP_invitro/
+│   ├── ASAP_PMDBS_bulkRNAseq/
+│   ├── ASAP_PMDBS_snRNAseq/
+│   └── ASAP_PMDBS_ONT/
+├── docs/                # Supplementary documentation and notebooks
+└── README.md            # This file
+```
 
-├── code/ # Analysis code organized by data type and workflow stage
+Each data type subfolder under `code/` follows the same structure:
 
-├── envs/ # Environment files (conda, Docker, R sessionInfo)
-
-├── docs/ # Documentation and supplementary material
-
-└── README.md
-
----
-
-### Data Types
-- `ASAP_invitro`  
-- `ASAP_PMDBS_bulkRNAseq`  
-- `ASAP_PMDBS_snRNAseq`  
-- `ASAP_PMDBS_ONT`  
-
-Each data type has its own subfolders in both `data/` and `code/`.
-
----
-
-## Code Organization
-
-Within each data type:
-
-- **`preprocessing/`**  
-  - Snakemake workflows, Python scripts, and Jupyter notebooks for initial data handling.  
-
-- **`processing/`**  
-  - R Markdown notebooks and scripts for statistical analyses and transformations.  
-
-- **`visualization/`**  
-  - R Markdown notebooks and scripts for generating figures and plots used in the publication.  
+* `preprocessing/` — Snakemake workflows, Python scripts and notebooks for raw -> cleaned data
+* `processing/` — R Markdown notebooks and scripts for statistical analyses, derived tables, and most of publication figures
+* `visualization/` — R Markdown notebooks and scripts that use clean data tables to generate some of the publication figures
 
 ---
 
 ## Data
 
-The `data/` directory contains cleaned and analysis-ready results such as:
-- Tables  
-- Annotations  
-- Test results  
+Processed data (tables and annotations) required to reproduce figures and analyses are included in the `data/` directory. Large or restricted raw datasets are available from the corresponding data repositories or upon request. When using these data, please follow any applicable data-use agreements.
 
-⚠️ **Note**: Raw data is not stored in this repository due to size and privacy restrictions.  
+Associated zenodo repositories for raw data:
 
----
-
-## Reproducibility
-
-- Environment files are stored in `envs/` (conda `.yml`, Dockerfiles, or R `sessionInfo`).  
-- Please install environments as needed before running workflows. Example:
-
-```bash
-conda env create -f envs/asap_preprocessing.yml
-conda activate asap_preprocessing
-```
-
----
-
-## Getting Started
-
-Clone the repository:
-```bash
-git clone git@github.com:Molecular-Neurogenetics/PD_ASAP_Garza2025.git
-cd PD_ASAP_Garza2025
-```
-
-Install required environments (see envs/).
-Navigate to the relevant data type in code/ and follow the workflow.
+* Single nuclei sequencing of brain regions from healthy and Parkinson's Disease individuals (DOI:10.5281/zenodo.15162835)[https://zenodo.org/records/15162835]
+* Deep bulk RNAseq of neurological controls and PD brains (DOI:10.5281/zenodo.16929448)[https://zenodo.org/records/16988140]
+* Bulk RNAseq of dopaminergic neurons in vitro cultures (DOI:10.5281/zenodo.17149266)[https://zenodo.org/records/17149267]
+* Bulk RNAseq of microglia in vitro cultures (DOI:10.5281/zenodo.17149290)[https://zenodo.org/records/17149291]
 
 ---
 
 ## License
 
-MIT License unless otherwise specified.
+Unless otherwise specified in subfolders, code and data in this repository are released under the MIT License.
 
 ---
 
 ## Citation
 
-If you use this repository, please cite:
+If you use these data or code, please cite the article:
 
-[Full citation for the ASAP publication will go here]
+Activation of transposable elements is linked to a region- and cell-type-specific interferon response in Parkinson’s disease
+Raquel Garza, Anita Adami, Arun Thiruvalluvan, Sasvi Wijesinghe, Annabel Curle, Oliver Tam, Talitha Forcier, Danai A Lagka, Nina L Kazakou, Diahann A.M Atacho, Yogita Sharma, Marie Jönsson, Vivien Horvath, Sara Bermudez, Jenny Johansson, Daniel B. Rainbow, Laura Castilla-Vallmanya, Joanne L. Jones, Annelies Quaegebeur, Molly Gale Hammell, Agnete Kirkeby, Roger A. Barker, Johan Jakobsson
+bioRxiv 2025.09.03.673956; doi: https://doi.org/10.1101/2025.09.03.673956
 
 ---
 
 ## Contact
 
-For questions, please contact Raquel Garza (raquel.garza@med.lu.se).
-
+For questions about the repository or data access, please contact Raquel Garza: [raquel.garza@med.lu.se](mailto:raquel.garza@med.lu.se)
