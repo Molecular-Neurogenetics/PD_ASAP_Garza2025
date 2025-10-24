@@ -1,4 +1,4 @@
-# 🚀 Activation of transposable elements is linked to a region- and cell-type-specific interferon response in Parkinson’s disease
+# Activation of transposable elements is linked to a region- and cell-type-specific interferon response in Parkinson’s disease
 
 This repository contains code, processed data, and environment files supporting the publication:
 
