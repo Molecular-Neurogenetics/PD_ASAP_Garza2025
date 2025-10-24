@@ -1,3 +1,4 @@
+[![DOI](https://zenodo.org/badge/1048897346.svg)](https://doi.org/10.5281/zenodo.17434560)
 # Activation of transposable elements is linked to a region- and cell-type-specific interferon response in Parkinson’s disease
 
 This repository contains code, processed data, and environment files supporting the publication:
