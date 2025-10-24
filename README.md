@@ -59,6 +59,8 @@ If you use these data or code, please cite the article:
 Raquel Garza, Anita Adami, Arun Thiruvalluvan, Sasvi Wijesinghe, Annabel Curle, Oliver Tam, Talitha Forcier, Danai A Lagka, Nina L Kazakou, Diahann A.M Atacho, Yogita Sharma, Marie Jönsson, Vivien Horvath, Sara Bermudez, Jenny Johansson, Daniel B. Rainbow, Laura Castilla-Vallmanya, Joanne L. Jones, Annelies Quaegebeur, Molly Gale Hammell, Agnete Kirkeby, Roger A. Barker, Johan Jakobsson  
 bioRxiv 2025.09.03.673956; doi: [https://doi.org/10.1101/2025.09.03.673956](https://doi.org/10.1101/2025.09.03.673956)
 
+This biorxiv version has been produced with release v1.0 [![DOI](https://zenodo.org/badge/1048897346.svg)](https://doi.org/10.5281/zenodo.17434560)
+
 ---
 
 ## ✉️ Contact
